@@ -1,4 +1,3 @@
-AGC-MANAGEMENT-SYSTEM
 -- Initial database schema
 -- Currency: Saudi Riyal (SAR)
 
