@@ -1,110 +1,253 @@
-import streamlit as st
-from supabase import create_client, Client
-import os
+-- AGC Management System
+-- Initial database schema
+-- Currency: Saudi Riyal (SAR)
 
-st.set_page_config(
-    page_title="AGC Management System",
-    page_icon="🏢",
-    layout="wide"
-)
+create extension if not exists pgcrypto;
 
-# Supabase connection
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+-- 1. User profiles and roles
+create table if not exists public.profiles (
+    id uuid primary key references auth.users(id) on delete cascade,
+    username text unique not null,
+    full_name text not null,
+    role text not null default 'employee'
+        check (role in ('admin', 'employee')),
+    is_active boolean not null default true,
+    created_at timestamptz not null default now()
+);
 
-@st.cache_resource
-def connect_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+-- 2. Employees
+create table if not exists public.employees (
+    id uuid primary key default gen_random_uuid(),
+    full_name text not null,
+    mobile text,
+    iqama_number text unique,
+    iqama_expiry date,
+    job_title text,
+    monthly_salary numeric(12,2) not null default 0
+        check (monthly_salary >= 0),
+    monthly_iqama_expense numeric(12,2) not null default 0
+        check (monthly_iqama_expense >= 0),
+    is_active boolean not null default true,
+    notes text,
+    created_at timestamptz not null default now()
+);
 
-supabase: Client = connect_supabase()
+-- 3. Salary records
+create table if not exists public.salary_records (
+    id uuid primary key default gen_random_uuid(),
+    employee_id uuid not null references public.employees(id),
+    salary_month date not null,
+    amount_due numeric(12,2) not null check (amount_due >= 0),
+    amount_paid numeric(12,2) not null default 0
+        check (amount_paid >= 0),
+    due_date date not null,
+    payment_date date,
+    status text not null default 'Unpaid'
+        check (status in ('Unpaid', 'Partial', 'Paid')),
+    notes text,
+    created_at timestamptz not null default now(),
+    unique(employee_id, salary_month),
+    check (amount_paid <= amount_due)
+);
 
-st.title("AGC Management System")
+-- 4. Vehicles
+create table if not exists public.vehicles (
+    id uuid primary key default gen_random_uuid(),
+    vehicle_name text not null,
+    plate_number text unique not null,
+    notes text,
+    is_active boolean not null default true,
+    created_at timestamptz not null default now()
+);
 
-# Session
-if "user" not in st.session_state:
-    st.session_state.user = None
+-- 5. Drivers
+create table if not exists public.drivers (
+    id uuid primary key default gen_random_uuid(),
+    full_name text not null,
+    mobile text,
+    notes text,
+    is_active boolean not null default true,
+    created_at timestamptz not null default now()
+);
 
-if "profile" not in st.session_state:
-    st.session_state.profile = None
+-- 6. Driver advances
+create table if not exists public.driver_advances (
+    id uuid primary key default gen_random_uuid(),
+    driver_id uuid not null references public.drivers(id),
+    vehicle_id uuid references public.vehicles(id),
+    amount numeric(12,2) not null check (amount > 0),
+    advance_date date not null default current_date,
+    description text,
+    created_at timestamptz not null default now()
+);
 
-# Login
-if st.session_state.user is None:
-    st.subheader("Admin Login")
+-- 7. Petty cash fund transactions
+create table if not exists public.petty_cash_fund (
+    id uuid primary key default gen_random_uuid(),
+    transaction_type text not null
+        check (transaction_type in ('IN', 'OUT')),
+    amount numeric(12,2) not null check (amount > 0),
+    transaction_date date not null default current_date,
+    description text,
+    created_at timestamptz not null default now()
+);
 
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
+-- 8. Petty cash expenses
+create table if not exists public.petty_cash_expenses (
+    id uuid primary key default gen_random_uuid(),
+    driver_id uuid references public.drivers(id),
+    vehicle_id uuid references public.vehicles(id),
+    category text not null
+        check (category in (
+            'Maintenance', 'Oil Change', 'Tyre Change',
+            'Fuel', 'Other'
+        )),
+    amount numeric(12,2) not null check (amount > 0),
+    expense_date date not null default current_date,
+    description text,
+    created_at timestamptz not null default now()
+);
 
-    if st.button("Login", type="primary"):
-        try:
-            result = supabase.auth.sign_in_with_password({
-                "email": email,
-                "password": password
-            })
+-- 9. Accommodations
+create table if not exists public.accommodations (
+    id uuid primary key default gen_random_uuid(),
+    accommodation_name text not null,
+    address text,
+    monthly_rent numeric(12,2) not null default 0
+        check (monthly_rent >= 0),
+    payment_frequency text not null default 'Monthly'
+        check (payment_frequency in (
+            'Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'
+        )),
+    next_due_date date,
+    notes text,
+    is_active boolean not null default true,
+    created_at timestamptz not null default now()
+);
 
-            user = result.user
+-- 10. Accommodation rent payments
+create table if not exists public.accommodation_rent_payments (
+    id uuid primary key default gen_random_uuid(),
+    accommodation_id uuid not null
+        references public.accommodations(id),
+    amount_due numeric(12,2) not null check (amount_due >= 0),
+    amount_paid numeric(12,2) not null default 0
+        check (amount_paid >= 0),
+    due_date date not null,
+    payment_date date,
+    status text not null default 'Unpaid'
+        check (status in ('Unpaid', 'Partial', 'Paid')),
+    notes text,
+    created_at timestamptz not null default now(),
+    check (amount_paid <= amount_due)
+);
 
-            profile_result = (
-                supabase.table("profiles")
-                .select("id, username, full_name, role, is_active")
-                .eq("id", user.id)
-                .single()
-                .execute()
-            )
+-- 11. Utility bills
+create table if not exists public.utility_bills (
+    id uuid primary key default gen_random_uuid(),
+    accommodation_id uuid references public.accommodations(id),
+    bill_type text not null,
+    amount numeric(12,2) not null check (amount >= 0),
+    bill_date date,
+    due_date date not null,
+    payment_date date,
+    status text not null default 'Unpaid'
+        check (status in ('Unpaid', 'Pending', 'Paid')),
+    description text,
+    created_at timestamptz not null default now()
+);
 
-            profile = profile_result.data
+-- 12. Office expenses
+create table if not exists public.office_expenses (
+    id uuid primary key default gen_random_uuid(),
+    category text not null,
+    amount numeric(12,2) not null check (amount >= 0),
+    expense_date date not null default current_date,
+    due_date date,
+    payment_date date,
+    status text not null default 'Paid'
+        check (status in ('Unpaid', 'Pending', 'Paid')),
+    description text,
+    created_at timestamptz not null default now()
+);
 
-            if not profile["is_active"]:
-                supabase.auth.sign_out()
-                st.error("Your account is inactive.")
-            elif profile["role"] != "admin":
-                supabase.auth.sign_out()
-                st.error("Admin access only.")
-            else:
-                st.session_state.user = user
-                st.session_state.profile = profile
-                st.rerun()
+-- 13. Reminder records
+create table if not exists public.reminders (
+    id uuid primary key default gen_random_uuid(),
+    title text not null,
+    message text,
+    reminder_date date not null,
+    related_type text,
+    related_id uuid,
+    is_completed boolean not null default false,
+    created_at timestamptz not null default now()
+);
 
-        except Exception as e:
-            st.error(f"Login failed: {e}")
+-- Enable Row Level Security on all tables
+alter table public.profiles enable row level security;
+alter table public.employees enable row level security;
+alter table public.salary_records enable row level security;
+alter table public.vehicles enable row level security;
+alter table public.drivers enable row level security;
+alter table public.driver_advances enable row level security;
+alter table public.petty_cash_fund enable row level security;
+alter table public.petty_cash_expenses enable row level security;
+alter table public.accommodations enable row level security;
+alter table public.accommodation_rent_payments enable row level security;
+alter table public.utility_bills enable row level security;
+alter table public.office_expenses enable row level security;
+alter table public.reminders enable row level security;
 
-# Admin dashboard
-else:
-    profile = st.session_state.profile
+-- Initial policies: authenticated users can read records.
+-- Admin-only write policies will be added after user setup.
+create policy "Authenticated users can read profiles"
+on public.profiles for select to authenticated
+using (true);
 
-    st.success(f"Welcome, {profile['full_name']}")
-    st.caption("Administrator Dashboard")
+create policy "Authenticated users can read employees"
+on public.employees for select to authenticated
+using (true);
 
-    if st.sidebar.button("Logout"):
-        supabase.auth.sign_out()
-        st.session_state.user = None
-        st.session_state.profile = None
-        st.rerun()
+create policy "Authenticated users can read salary records"
+on public.salary_records for select to authenticated
+using (true);
 
-    st.sidebar.title("AGC Menu")
+create policy "Authenticated users can read vehicles"
+on public.vehicles for select to authenticated
+using (true);
 
-    page = st.sidebar.radio(
-        "Select Module",
-        [
-            "Dashboard",
-            "Employees",
-            "Salary Records",
-            "Vehicles",
-            "Drivers",
-            "Driver Advances",
-            "Petty Cash",
-            "Accommodations",
-            "Rent Payments",
-            "Utility Bills",
-            "Office Expenses",
-            "Reminders"
-        ]
-    )
+create policy "Authenticated users can read drivers"
+on public.drivers for select to authenticated
+using (true);
 
-    if page == "Dashboard":
-        st.title("Main Dashboard")
-        st.write("Welcome to AGC Management System")
-        st.info("Management modules will be connected here.")
+create policy "Authenticated users can read driver advances"
+on public.driver_advances for select to authenticated
+using (true);
 
-    else:
-        st.title(page)
-        st.info(f"{page} module is ready for database integration.")
+create policy "Authenticated users can read petty cash fund"
+on public.petty_cash_fund for select to authenticated
+using (true);
+
+create policy "Authenticated users can read petty cash expenses"
+on public.petty_cash_expenses for select to authenticated
+using (true);
+
+create policy "Authenticated users can read accommodations"
+on public.accommodations for select to authenticated
+using (true);
+
+create policy "Authenticated users can read rent payments"
+on public.accommodation_rent_payments for select to authenticated
+using (true);
+
+create policy "Authenticated users can read utility bills"
+on public.utility_bills for select to authenticated
+using (true);
+
+create policy "Authenticated users can read office expenses"
+on public.office_expenses for select to authenticated
+using (true);
+
+create policy "Authenticated users can read reminders"
+on public.reminders for select to authenticated
+using (true);
