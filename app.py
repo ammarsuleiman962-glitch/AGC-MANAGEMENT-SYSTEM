@@ -1,330 +1,420 @@
-Here is the complete, compact app.py (under 500 lines, safely below your 552-line limit) with all features, calculations, validations, notifications, and modules preserved.
-import calendar
-import smtplib
-import uuid
-from datetime import date
-from email.message import EmailMessage
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from supabase import create_client
 
 st.set_page_config(page_title="AGC Management System", page_icon="🏢", layout="wide")
 
-IQAMA_RATE = 1500.0
-IQAMA_OPTIONS = {"3 Months (SAR 4,500)": 3, "6 Months (SAR 9,000)": 6, "9 Months (SAR 13,500)": 9, "12 Months (SAR 18,000)": 12}
-
+# -------------------------------------------------------------------
+# Supabase connection
+# .streamlit/secrets.toml:
+# SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+# SUPABASE_KEY = "YOUR_SERVER_SIDE_KEY"
+# -------------------------------------------------------------------
 @st.cache_resource
 def connect_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError("Add SUPABASE_URL and SUPABASE_KEY to .streamlit/secrets.toml")
+    return create_client(url, key)
 
-supabase = connect_supabase()
+try:
+    supabase = connect_supabase()
+except Exception as exc:
+    st.error(f"Supabase connection error: {exc}")
+    st.stop()
 
+# field tuple: database column, widget type, required
 MODULES = {
-    "Employees": {"table": "employees", "fields": [("full_name", "text", True), ("mobile", "text", False), ("iqama_number", "text", False), ("iqama_expiry", "date", False), ("job_title", "text", False), ("monthly_salary", "number", True), ("monthly_iqama_expense", "number", True), ("is_active", "boolean", True), ("notes", "text", False)]},
-    "Vehicles": {"table": "vehicles", "fields": [("vehicle_name", "text", True), ("plate_number", "text", True), ("notes", "text", False)]},
-    "Drivers": {"table": "drivers", "fields": [("full_name", "text", True), ("mobile", "text", False), ("notes", "text", False), ("is_active", "boolean", True)]},
-    "Driver Advances": {"table": "driver_advances", "fields": [("driver_id", "fk:drivers", True), ("vehicle_id", "fk:vehicles", False), ("amount", "number", True), ("advance_date", "date", True), ("description", "text", False)]},
-    "Petty Cash Fund": {"table": "petty_cash_fund", "fields": [("transaction_type", "select:IN,OUT", True), ("amount", "number", True), ("transaction_date", "date", True), ("description", "text", False)]},
-    "Petty Cash Expenses": {"table": "petty_cash_expenses", "fields": [("driver_id", "fk:drivers", False), ("vehicle_id", "fk:vehicles", False), ("category", "select:Maintenance,Oil Change,Tyre Change,Fuel,Other", True), ("amount", "number", True), ("expense_date", "date", True), ("description", "text", False)]},
-    "Accommodations": {"table": "accommodations", "fields": [("accommodation_name", "text", True), ("address", "text", False), ("monthly_rent", "number", True), ("payment_frequency", "select:Monthly,Quarterly,Half-Yearly,Yearly", True), ("next_due_date", "date", False), ("notes", "text", False), ("is_active", "boolean", True)]},
-    "Rent Payments": {"table": "accommodation_rent_payments", "fields": [("accommodation_id", "fk:accommodations", True), ("amount_due", "number", True), ("amount_paid", "number", True), ("due_date", "date", True), ("payment_date", "date", False), ("status", "select:Unpaid,Partial,Paid", True), ("notes", "text", False)]},
-    "Utility Bills": {"table": "utility_bills", "fields": [("accommodation_id", "fk:accommodations", False), ("bill_type", "text", True), ("amount", "number", True), ("bill_date", "date", False), ("due_date", "date", True), ("payment_date", "date", False), ("status", "select:Unpaid,Pending,Paid", True), ("description", "text", False)]},
-    "Office Expenses": {"table": "office_expenses", "fields": [("category", "text", True), ("amount", "number", True), ("expense_date", "date", True), ("due_date", "date", False), ("payment_date", "date", False), ("status", "select:Unpaid,Pending,Paid", True), ("description", "text", False)]},
-    "Reminders": {"table": "reminders", "fields": [("title", "text", True), ("message", "text", False), ("reminder_date", "date", True), ("related_type", "text", False), ("related_id", "text", False), ("is_completed", "boolean", True)]},
-    "Guardian Contacts": {"table": "guardian_contacts", "fields": [("full_name", "text", True), ("email", "text", True), ("phone", "text", False), ("is_active", "boolean", True), ("notes", "text", False)]},
+    "Employees": {"table": "employees", "fields": [
+        ("full_name", "text", True), ("mobile", "text", False),
+        ("iqama_number", "text", False), ("iqama_expiry", "optional_date", False),
+        ("job_title", "text", False), ("monthly_salary", "number", True),
+        ("monthly_iqama_expense", "number", True), ("is_active", "boolean", True),
+        ("notes", "textarea", False)]},
+    "Salary Records": {"table": "salary_records", "fields": [
+        ("employee_id", "fk:employees", True), ("salary_month", "date", True),
+        ("amount_due", "number", True), ("amount_paid", "number", True),
+        ("due_date", "date", True), ("payment_date", "optional_date", False),
+        ("status", "select:Unpaid,Partial,Paid", True), ("notes", "textarea", False)]},
+    "Vehicles": {"table": "vehicles", "fields": [
+        ("vehicle_name", "text", True), ("plate_number", "text", True),
+        ("notes", "textarea", False)]},
+    "Drivers": {"table": "drivers", "fields": [
+        ("full_name", "text", True), ("mobile", "text", False),
+        ("notes", "textarea", False), ("is_active", "boolean", True)]},
+    "Driver Advances": {"table": "driver_advances", "fields": [
+        ("driver_id", "fk:drivers", True), ("vehicle_id", "fk:vehicles", False),
+        ("amount", "number", True), ("advance_date", "date", True),
+        ("description", "textarea", False)]},
+    "Petty Cash Fund": {"table": "petty_cash_fund", "fields": [
+        ("transaction_type", "select:IN,OUT", True), ("amount", "number", True),
+        ("transaction_date", "date", True), ("description", "textarea", False)]},
+    "Petty Cash Expenses": {"table": "petty_cash_expenses", "fields": [
+        ("driver_id", "fk:drivers", False), ("vehicle_id", "fk:vehicles", False),
+        ("category", "select:Maintenance,Oil Change,Tyre Change,Fuel,Other", True),
+        ("amount", "number", True), ("expense_date", "date", True),
+        ("description", "textarea", False)]},
+    "Accommodations": {"table": "accommodations", "fields": [
+        ("accommodation_name", "text", True), ("address", "text", False),
+        ("monthly_rent", "number", True),
+        ("payment_frequency", "select:Monthly,Quarterly,Half-Yearly,Yearly", True),
+        ("next_due_date", "optional_date", False), ("notes", "textarea", False),
+        ("is_active", "boolean", True)]},
+    "Rent Payments": {"table": "accommodation_rent_payments", "fields": [
+        ("accommodation_id", "fk:accommodations", True), ("amount_due", "number", True),
+        ("amount_paid", "number", True), ("due_date", "date", True),
+        ("payment_date", "optional_date", False),
+        ("status", "select:Unpaid,Partial,Paid", True), ("notes", "textarea", False)]},
+    "Utility Bills": {"table": "utility_bills", "fields": [
+        ("accommodation_id", "fk:accommodations", False), ("bill_type", "text", True),
+        ("amount", "number", True), ("bill_date", "optional_date", False),
+        ("due_date", "date", True), ("payment_date", "optional_date", False),
+        ("status", "select:Unpaid,Pending,Paid", True), ("description", "textarea", False)]},
+    "Office Expenses": {"table": "office_expenses", "fields": [
+        ("category", "text", True), ("amount", "number", True),
+        ("expense_date", "date", True), ("due_date", "optional_date", False),
+        ("payment_date", "optional_date", False),
+        ("status", "select:Unpaid,Pending,Paid", True), ("description", "textarea", False)]},
+    "Reminders": {"table": "reminders", "fields": [
+        ("title", "text", True), ("message", "textarea", False),
+        ("reminder_date", "date", True), ("related_type", "text", False),
+        ("related_id", "text", False), ("is_completed", "boolean", True)]},
 }
 
-def to_float(v):
-    try:
-        return float(v or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-def sar(v):
-    return f"SAR {to_float(v):,.2f}"
-
-def as_date(v):
-    if not v:
-        return None
-    if isinstance(v, date):
-        return v
-    try:
-        return date.fromisoformat(str(v)[:10])
-    except ValueError:
-        return None
-
-def add_months(d, months):
-    m = d.month - 1 + months
-    y = d.year + m // 12
-    m = m % 12 + 1
-    return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
-
-def serialize(data):
-    return {k: (v.isoformat() if isinstance(v, date) else (None if v == "" else v)) for k, v in data.items()}
-
-def get_data(table, limit=2000, silent=False):
-    try:
-        return supabase.table(table).select("*").limit(limit).execute().data or []
-    except Exception as exc:
-        if not silent:
-            st.error(f"Could not read {table}: {exc}")
-        return []
-
-def stable_rows(rows):
-    return sorted(rows, key=lambda r: (str(r.get("created_at") or ""), str(r.get("id") or "")))
-
-def display_label(row, fallback):
-    for k in ("full_name", "accommodation_name", "vehicle_name", "title", "plate_number", "bill_type", "category"):
-        if row.get(k):
-            return str(row[k])
-    return str(fallback)
-
-def flash(msg, kind="success"):
-    st.session_state["agc_flash"] = (kind, msg)
+def flash(message, kind="success"):
+    st.session_state["agc_flash"] = (kind, message)
 
 def show_flash():
     item = st.session_state.pop("agc_flash", None)
     if item:
-        getattr(st, item[0], st.success)(item[1])
+        kind, message = item
+        getattr(st, kind, st.success)(message)
 
-def calc_status(due, paid):
-    d, p = round(to_float(due), 2), round(to_float(paid), 2)
-    return "Unpaid" if p <= 0 else ("Paid" if p >= d else "Partial")
+def read_rows(table, limit=5000):
+    try:
+        response = supabase.table(table).select("*").limit(limit).execute()
+        return response.data or []
+    except Exception as exc:
+        st.error(f"Could not read {table}: {exc}")
+        return []
 
-def adv_summary(emp_id, rows):
-    taken = sum(to_float(r.get("amount")) for r in rows if str(r.get("employee_id")) == str(emp_id) and r.get("transaction_type") == "ADVANCE")
-    ded = sum(to_float(r.get("amount")) for r in rows if str(r.get("employee_id")) == str(emp_id) and r.get("transaction_type") == "DEDUCTION")
-    return round(taken, 2), round(ded, 2), max(0.0, round(taken - ded, 2))
+def as_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
 
-def render_field(field, kind, key, old=None, required=False):
+def money(value):
+    try:
+        return f"SAR {float(value or 0):,.2f}"
+    except (TypeError, ValueError):
+        return "SAR 0.00"
+
+def display_label(row, fallback="Record"):
+    return str(row.get("full_name") or row.get("accommodation_name") or
+                row.get("vehicle_name") or row.get("title") or
+                row.get("plate_number") or fallback)
+
+def fk_map(table):
+    rows = read_rows(table)
+    return {str(r["id"]): r for r in rows if r.get("id")}
+
+def field_label(field):
+    return field.replace("_", " ").title()
+
+def render_field(field, kind, key, old=None):
     old = old or {}
-    val = old.get(field)
-    label = "Iqama Renewal Fee / Month (Info Only — SAR 1,500)" if field == "monthly_iqama_expense" else field.replace("_", " ").title()
+    value = old.get(field)
+    label = field_label(field)
+
     if kind == "text":
-        return st.text_input(label, value="" if val is None else str(val), key=key)
+        return st.text_input(label, value="" if value is None else str(value), key=key)
+    if kind == "textarea":
+        return st.text_area(label, value="" if value is None else str(value), key=key)
     if kind == "number":
-        default_v = IQAMA_RATE if (field == "monthly_iqama_expense" and val is None) else 0.0
-        return st.number_input(label, min_value=0.0, value=to_float(val) if val is not None else default_v, step=50.0, key=key)
+        try:
+            initial = float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            initial = 0.0
+        return st.number_input(label, min_value=0.0, value=initial, step=1.0, format="%.2f", key=key)
     if kind == "date":
-        parsed = as_date(val)
-        if not required and parsed is None:
-            if not st.checkbox(f"Set {label}", value=False, key=f"{key}_en"):
-                return None
-            return st.date_input(label, value=date.today(), key=key)
-        return st.date_input(label, value=parsed or date.today(), key=key)
+        initial = as_date(value) or date.today()
+        return st.date_input(label, value=initial, key=key)
+    if kind == "optional_date":
+        current = as_date(value)
+        enabled = st.checkbox(f"Set {label.lower()}", value=current is not None, key=f"{key}_enabled")
+        if not enabled:
+            return None
+        return st.date_input(label, value=current or date.today(), key=key)
     if kind == "boolean":
-        return st.checkbox(label, value=True if val is None else bool(val), key=key)
+        return st.checkbox(label, value=True if value is None else bool(value), key=key)
     if kind.startswith("select:"):
-        opts = kind.split(":", 1)[1].split(",")
-        return st.selectbox(label, opts, index=opts.index(val) if val in opts else 0, key=key)
+        choices = kind.split(":", 1)[1].split(",")
+        selected = str(value) if value is not None else choices[0]
+        index = choices.index(selected) if selected in choices else 0
+        return st.selectbox(label, choices, index=index, key=key)
     if kind.startswith("fk:"):
         target = kind.split(":", 1)[1]
-        opts = {str(r["id"]): r for r in get_data(target) if r.get("id") is not None}
-        if not opts:
-            if required:
-                st.warning(f"No records in {target}. Add one first.")
+        options = fk_map(target)
+        if not options:
+            st.warning(f"No records found in {target}. Add the related record first.")
             return None
-        ids = list(opts.keys()) if required else [""] + list(opts.keys())
-        sel = str(val) if val is not None else ""
-        chosen = st.selectbox(label, ids, index=ids.index(sel) if sel in ids else 0, format_func=lambda x: "— None —" if x == "" else display_label(opts[x], x), key=key)
-        return chosen or None
+        ids = list(options)
+        optional = not any(x[0] == field and x[2] for x in [])
+        choices = ([""] + ids) if field in ("vehicle_id", "driver_id", "accommodation_id") else ids
+        old_id = str(value) if value else ""
+        index = choices.index(old_id) if old_id in choices else 0
+        selected = st.selectbox(
+            label, choices, index=index,
+            format_func=lambda item: "— None —" if item == "" else display_label(options[item], item),
+            key=key
+        )
+        return selected or None
     return None
 
-def build_notifications():
-    today, items = date.today(), []
-    def add_item(cat, title, due, detail, amount=None, status=None, win=20):
-        d = as_date(due)
-        if not d or (status and str(status).lower() == "paid"):
-            return
-        days = (d - today).days
-        if days <= win:
-            timing = f"Due in {days} day(s)" if days > 0 else ("Due today" if days == 0 else f"Overdue by {abs(days)} day(s)")
-            items.append({"category": cat, "title": title, "due_date": d, "days": days, "timing": timing, "detail": detail, "amount": amount})
-
-    emps = get_data("employees")
-    emp_map = {str(r["id"]): r.get("full_name", "Employee") for r in emps if r.get("id")}
-    for r in emps:
-        if r.get("is_active", True) and r.get("iqama_expiry"):
-            exp = as_date(r.get("iqama_expiry"))
-            if exp:
-                if (exp - today).days <= 0:
-                    add_item("Iqama Renewal Required", "Iqama Renewal Required", exp, f"Employee: {r.get('full_name')} — Renew in Additional Expenses", win=30)
-                elif (exp - today).days <= 30:
-                    add_item("Iqama Expiry", "Iqama Expiring Soon", exp, f"Employee: {r.get('full_name')}", win=30)
-    for r in get_data("salary_records"):
-        out = max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
-        st_lbl = str(r.get("status") or "Unpaid")
-        if out > 0 and st_lbl.lower() != "paid":
-            cat = "Partial Salary" if st_lbl.lower() == "partial" else "Unpaid Salary"
-            add_item(cat, f"{cat} ({str(r.get('salary_month', ''))[:7]})", r.get("due_date"), f"Employee: {emp_map.get(str(r.get('employee_id')), 'Employee')}", out, st_lbl)
-    acc_map = {str(r["id"]): r.get("accommodation_name", "Accommodation") for r in get_data("accommodations") if r.get("id")}
-    for r in get_data("accommodation_rent_payments"):
-        out = max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
-        if out > 0:
-            add_item("Rent Due", "Rent Payment Due", r.get("due_date"), acc_map.get(str(r.get("accommodation_id")), "Accommodation"), out, r.get("status"))
-    for r in get_data("utility_bills"):
-        if str(r.get("status", "")).lower() != "paid":
-            add_item("Utility Bill", f"Utility: {r.get('bill_type', 'Bill')}", r.get("due_date"), acc_map.get(str(r.get("accommodation_id")), "Accommodation"), r.get("amount"), r.get("status"))
-    for r in get_data("office_expenses"):
-        if str(r.get("status", "")).lower() != "paid":
-            add_item("Office Expense", f"Office: {r.get('category', 'Expense')}", r.get("due_date"), r.get("description") or "Office expense", r.get("amount"), r.get("status"))
-    for r in get_data("reminders"):
-        if not r.get("is_completed"):
-            add_item("Reminder", r.get("title", "Reminder"), r.get("reminder_date"), r.get("message") or "Reminder")
-    return sorted(items, key=lambda x: x["due_date"])
-
-def send_due_emails(items):
-    guardians = get_data("guardian_contacts", silent=True)
-    recipients = [r["email"] for r in guardians if r.get("is_active", True) and r.get("email")]
-    cfg = st.secrets.get("email", {})
-    if not recipients:
-        return "No active guardian contacts with email addresses."
-    if not all(cfg.get(k) for k in ("smtp_host", "smtp_port", "smtp_username", "smtp_password", "from_email")):
-        return "Email SMTP settings are not configured in Streamlit Secrets."
-    sent = 0
-    for item in items:
-        if item["days"] not in (20, 15, 7, 0) and item["days"] >= 0:
-            continue
-        body = f"AGC Reminder\n\n{item['title']}\n{item['detail']}\nDue: {item['due_date']} ({item['timing']})\nAmount: {sar(item['amount']) if item['amount'] is not None else 'N/A'}\n"
-        for rec in recipients:
-            key = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{rec}|{item['title']}|{item['due_date']}|{item['detail']}"))
-            try:
-                if supabase.table("notification_log").select("id").eq("event_key", key).limit(1).execute().data:
-                    continue
-                msg = EmailMessage()
-                msg["Subject"], msg["From"], msg["To"] = f"AGC Reminder: {item['title']}", cfg["from_email"], rec
-                msg.set_content(body)
-                with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=20) as srv:
-                    srv.starttls()
-                    srv.login(cfg["smtp_username"], cfg["smtp_password"])
-                    srv.send_message(msg)
-                supabase.table("notification_log").insert({"event_key": key, "recipient_email": rec, "event_title": item["title"], "due_date": item["due_date"].isoformat()}).execute()
-                sent += 1
-            except Exception:
-                pass
-    return f"Processed notifications. Sent {sent} new email(s)."
-
-def dashboard_page():
-    st.title("AGC Management System — Dashboard")
-    show_flash()
-    emps, vehs, drvs = get_data("employees"), get_data("vehicles"), get_data("drivers")
-    sals, advs = get_data("salary_records"), get_data("employee_advances", silent=True)
-    pfund, pexp = get_data("petty_cash_fund"), get_data("petty_cash_expenses")
-    rents, utils, offs = get_data("accommodation_rent_payments"), get_data("utility_bills"), get_data("office_expenses")
-    iqamas, rems = get_data("iqama_renewals", silent=True), get_data("reminders")
-
-    monthly_sal = sum(to_float(e.get("monthly_salary")) for e in emps if e.get("is_active", True))
-    sal_out = sum(max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid"))) for r in sals if str(r.get("status", "")).lower() != "paid")
-    adv_bal = max(0.0, sum(to_float(r.get("amount")) for r in advs if r.get("transaction_type") == "ADVANCE") - sum(to_float(r.get("amount")) for r in advs if r.get("transaction_type") == "DEDUCTION"))
-    p_in = sum(to_float(r.get("amount")) for r in pfund if str(r.get("transaction_type", "")).upper() == "IN")
-    p_out = sum(to_float(r.get("amount")) for r in pfund if str(r.get("transaction_type", "")).upper() == "OUT")
-    p_exp_tot = sum(to_float(r.get("amount")) for r in pexp)
-    rent_paid = sum(to_float(r.get("amount_paid")) for r in rents)
-    rent_out = sum(max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid"))) for r in rents if str(r.get("status", "")).lower() != "paid")
-    iqama_tot = sum(to_float(r.get("required_amount")) for r in iqamas)
-    iqama_out = sum(max(0.0, to_float(r.get("required_amount")) - to_float(r.get("amount_paid"))) for r in iqamas if str(r.get("status", "")).lower() != "paid")
-
-    r1 = st.columns(4)
-    r1[0].metric("Total Employees", len(emps))
-    r1[1].metric("Active Employees", sum(1 for e in emps if e.get("is_active", True)))
-    r1[2].metric("Total Vehicles", len(vehs))
-    r1[3].metric("Total Drivers", len(drvs))
-
-    r2 = st.columns(4)
-    r2[0].metric("Monthly Salary", sar(monthly_sal))
-    r2[1].metric("Salary Outstanding", sar(sal_out))
-    r2[2].metric("Employee Advances", sar(adv_bal))
-    r2[3].metric("Upcoming Reminders", sum(1 for r in rems if not r.get("is_completed")))
-
-    r3 = st.columns(4)
-    r3[0].metric("Petty Cash Balance", sar(p_in - p_out - p_exp_tot))
-    r3[1].metric("Petty Cash Expenses", sar(p_exp_tot))
-    r3[2].metric("Accommodation Expenses", sar(rent_paid))
-    r3[3].metric("Outstanding Rent", sar(rent_out))
-
-    r4 = st.columns(4)
-    r4[0].metric("Utility Bills", sar(sum(to_float(r.get("amount")) for r in utils)))
-    r4[1].metric("Office Expenses", sar(sum(to_float(r.get("amount")) for r in offs)))
-    r4[2].metric("Additional Expenses", sar(iqama_tot))
-    r4[3].metric("Iqama Renewal Outstanding", sar(iqama_out))
-
-    st.divider()
-    st.subheader("Notifications & Action Required")
-    notifs = build_notifications()
-    if st.button("Send Due Email Alerts"):
-        st.info(send_due_emails(notifs))
-    if not notifs:
-        st.success("No urgent notifications or overdue items.")
-    else:
-        df = pd.DataFrame([{"No.": i, "Category": x["category"], "Title": x["title"], "Details": x["detail"], "Due Date": str(x["due_date"]), "Timing": x["timing"], "Amount": sar(x["amount"]) if x["amount"] is not None else "—"} for i, x in enumerate(notifs, 1)])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-def salary_advances_page():
-    st.title("Salary & Advances")
-    st.caption("Employee advances and salary settlements are tracked separately. Iqama Renewal Fees are never included in salary.")
-    show_flash()
-    emps = stable_rows(get_data("employees"))
-    if not emps:
-        st.info("Add employees first.")
-        return
-    emp_map = {str(e["id"]): e for e in emps}
-    emp_ids = list(emp_map.keys())
-    advs = stable_rows(get_data("employee_advances", silent=True))
-    sals = stable_rows(get_data("salary_records"))
-    sets = stable_rows(get_data("salary_settlements", silent=True))
-
-    t1, t2, t3, t4, t5 = st.tabs(["Give Advance", "Salary Payment", "Auto-Generate Salaries", "Salary Records", "Advance Ledger"])
-
-    with t1:
-        eid = st.selectbox("Select Employee", emp_ids, format_func=lambda x: emp_map[x]["full_name"], key="adv_emp")
-        tk, dd, rem = adv_summary(eid, advs)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Advance Taken", sar(tk))
-        c2.metric("Total Advance Deducted", sar(dd))
-        c3.metric("Remaining Advance Balance", sar(rem))
-        with st.form("adv_form"):
-            amt = st.number_input("Advance Amount (SAR)", min_value=0.0, step=100.0)
-            dt = st.date_input("Advance Date", value=date.today())
-            desc = st.text_input("Description")
-            if st.form_submit_button("Save Advance", type="primary"):
-                if amt <= 0:
-                    st.error("Amount must be greater than zero.")
-                else:
-                    supabase.table("employee_advances").insert({"employee_id": eid, "transaction_type": "ADVANCE", "amount": round(amt, 2), "transaction_date": dt.isoformat(), "description": desc or None}).execute()
-                    flash(f"Advance of {sar(amt)} saved.")
-                    st.rerun()
-
-    with t2:
-        eid = st.selectbox("Select Employee", emp_ids, format_func=lambda x: emp_map[x]["full_name"], key="sal_emp")
-        emp = emp_map[eid]
-        cm, cy = st.columns(2)
-        yr = cy.number_input("Year", 2020, 2100, date.today().year, 1)
-        mn = cm.selectbox("Salary Month", list(range(1, 13)), index=date.today().month - 1, format_func=lambda m: calendar.month_name[m])
-        sm_date = date(int(yr), int(mn), 1)
-        sm_iso = sm_date.isoformat()
-        rec = next((r for r in sals if str(r.get("employee_id")) == eid and str(r.get("salary_month"))[:7] == sm_iso[:7]), None)
-        due = to_float(rec["amount_due"]) if rec else to_float(emp.get("monthly_salary"))
-        paid = to_float(rec["amount_paid"]) if rec else 0.0
-        rem_sal = max(0.0, round(due - paid, 2))
-        _, _, adv_bal = adv_summary(eid, advs)
-
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Monthly Salary", sar(due))
-        s2.metric("Previously Settled", sar(paid))
-        s3.metric("Salary Outstanding", sar(rem_sal))
-        s4.metric("Previous Advance Balance", sar(adv_bal))
-
-        if rec and rem_sal <= 0:
-            st.success("Salary for this month is already Paid.")
+def serialize_values(values):
+    result = {}
+    for key, value in values.items():
+        if isinstance(value, (date, datetime)):
+            result[key] = value.isoformat()
+        elif value == "":
+            result[key] = None
         else:
-            with st.form("sal_pay_form"):
-                adv_ded = st.number_input("Advance Deduction This Month (SAR)", min_value=0.0, max_value=float(min(adv_bal, rem_sal)), value=0.0, step=100.0)
-                cash = st.number_input("Cash Paid (SAR)", min_value=0.0, max_value=float(rem_sal), value=0.0, step=100.0)
-                pdt = st.date_input("Payment Date", value=date.today())
-                notes = st.text_input("Notes")
-                tot_tx = round(adv_ded + cash, 2)
-                st.info(f"Total Settled Now: {sar(tot_tx)} | Remaining Salary: {sar(max(0.0, rem_sal - tot_tx))} | Remaining Advance: {sar(max(0.0, adv_bal - adv_ded))}")
-                if st.form_submit_button("Save Salary Payment", type="primary"):
-                    if tot_tx <= 0:
-                        st.error("Enter advance deduction or cash paid greater th
+            result[key] = value
+    return result
+
+def validate_values(fields, values):
+    missing = [field_label(f) for f, _, required in fields
+               if required and (values.get(f) is None or values.get(f) == "")]
+    if missing:
+        return "Please complete required fields: " + ", ".join(missing)
+    if "amount_due" in values and "amount_paid" in values:
+        if float(values["amount_paid"] or 0) > float(values["amount_due"] or 0):
+            return "Amount paid cannot be greater than amount due."
+    return None
+
+def module_page(name, config):
+    table = config["table"]
+    st.title(name)
+    add_tab, records_tab = st.tabs(["➕ Add New", "📋 Records"])
+
+    with add_tab:
+        with st.form(f"add_form_{table}"):
+            values = {}
+            for field, kind, required in config["fields"]:
+                values[field] = render_field(field, kind, f"add_{table}_{field}")
+            submitted = st.form_submit_button("Save Record", type="primary", use_container_width=True)
+        if submitted:
+            error = validate_values(config["fields"], values)
+            if error:
+                st.error(error)
+            else:
+                try:
+                    supabase.table(table).insert(serialize_values(values)).execute()
+                    flash(f"{name} record saved.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Save failed: {exc}")
+
+    show_flash()
+    with records_tab:
+        rows = read_rows(table)
+        if not rows:
+            st.info("No records found.")
+            return
+
+        df = pd.DataFrame(rows)
+        if "created_at" in df:
+            df = df.sort_values("created_at", ascending=False, na_position="last")
+        st.caption(f"{len(df)} record(s)")
+        search = st.text_input("Search records", key=f"search_{table}")
+        if search:
+            mask = df.astype(str).apply(lambda col: col.str.contains(search, case=False, na=False)).any(axis=1)
+            df = df[mask]
+        display_df = df.drop(columns=[c for c in ("id", "created_at") if c in df.columns], errors="ignore")
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        id_to_row = {str(r["id"]): r for r in rows}
+        selected_id = st.selectbox(
+            "Select a record for actions",
+            options=[""] + list(id_to_row),
+            format_func=lambda rid: "Choose a record..." if not rid else
+                f"{display_label(id_to_row[rid], 'Record')} · {rid[:8]}",
+            key=f"action_select_{table}"
+        )
+        if not selected_id:
+            return
+
+        row = id_to_row[selected_id]
+        view_col, edit_col, delete_col = st.columns(3)
+        with view_col:
+            if st.button("View details", key=f"view_{table}_{selected_id}", use_container_width=True):
+                st.session_state[f"show_view_{table}"] = selected_id
+        with edit_col:
+            if st.button("Edit record", key=f"edit_{table}_{selected_id}", use_container_width=True):
+                st.session_state[f"show_edit_{table}"] = selected_id
+        with delete_col:
+            if st.button("Delete record", key=f"delete_{table}_{selected_id}", use_container_width=True):
+                st.session_state[f"show_delete_{table}"] = selected_id
+
+        if st.session_state.get(f"show_view_{table}") == selected_id:
+            with st.expander("Record details", expanded=True):
+                st.json({k: v for k, v in row.items() if k != "id"})
+
+        if st.session_state.get(f"show_edit_{table}") == selected_id:
+            st.subheader("Edit selected record")
+            with st.form(f"edit_form_{table}_{selected_id}"):
+                updated = {}
+                for field, kind, required in config["fields"]:
+                    updated[field] = render_field(
+                        field, kind, f"edit_{table}_{selected_id}_{field}", row
+                    )
+                save = st.form_submit_button("Save Changes", type="primary")
+            if save:
+                error = validate_values(config["fields"], updated)
+                if error:
+                    st.error(error)
+                else:
+                    try:
+                        supabase.table(table).update(serialize_values(updated)).eq("id", selected_id).execute()
+                        st.session_state.pop(f"show_edit_{table}", None)
+                        flash(f"{name} record updated.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Update failed: {exc}")
+
+        if st.session_state.get(f"show_delete_{table}") == selected_id:
+            st.warning("This permanently deletes the selected record. Related records may prevent deletion.")
+            confirm = st.checkbox("I understand and confirm permanent deletion", key=f"confirm_{table}_{selected_id}")
+            if st.button("Confirm Delete", type="primary", key=f"confirm_delete_{table}_{selected_id}"):
+                if not confirm:
+                    st.warning("Please tick the confirmation box.")
+                else:
+                    try:
+                        supabase.table(table).delete().eq("id", selected_id).execute()
+                        st.session_state.pop(f"show_delete_{table}", None)
+                        flash(f"{name} record deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Delete failed: {exc}. Check whether other records reference this record.")
+
+def build_notifications():
+    today = date.today()
+    notices = []
+
+    def add(title, due_value, detail, status=None):
+        due = as_date(due_value)
+        if not due or (status and str(status).lower() == "paid"):
+            return
+        days = (due - today).days
+        if days < 0:
+            label = f"OVERDUE by {abs(days)} day(s)"
+            priority = 0
+        elif days == 0:
+            label, priority = "Due today", 1
+        elif days <= 7:
+            label, priority = f"Due in {days} day(s)", 2
+        else:
+            return
+        notices.append({"Priority": priority, "Item": title, "Due date": due.isoformat(),
+                        "Status": label, "Details": detail})
+
+    for r in read_rows("salary_records"):
+        add("Salary payment", r.get("due_date"),
+            f"Employee ID: {str(r.get('employee_id', ''))[:8]} · {money(r.get('amount_due'))}",
+            r.get("status"))
+    for r in read_rows("accommodation_rent_payments"):
+        add("Accommodation rent", r.get("due_date"),
+            f"Accommodation ID: {str(r.get('accommodation_id', ''))[:8]} · {money(r.get('amount_due'))}",
+            r.get("status"))
+    for r in read_rows("utility_bills"):
+        add(r.get("bill_type") or "Utility bill", r.get("due_date"),
+            money(r.get("amount")), r.get("status"))
+    for r in read_rows("office_expenses"):
+        if str(r.get("status", "")).lower() != "paid":
+            add(r.get("category") or "Office expense", r.get("due_date"),
+                money(r.get("amount")), r.get("status"))
+    for r in read_rows("reminders"):
+        if not r.get("is_completed"):
+            add(r.get("title") or "Reminder", r.get("reminder_date"),
+                r.get("message") or "General reminder")
+    return sorted(notices, key=lambda x: (x["Priority"], x["Due date"]))
+
+def dashboard():
+    st.title("🏢 AGC Management Dashboard")
+    today = date.today()
+    employee = read_rows("employees")
+    drivers = read_rows("drivers")
+    salary = read_rows("salary_records")
+    rent = read_rows("accommodation_rent_payments")
+    utilities = read_rows("utility_bills")
+    office = read_rows("office_expenses")
+    advances = read_rows("driver_advances")
+    petty = read_rows("petty_cash_expenses")
+    fund = read_rows("petty_cash_fund")
+
+    def total(rows, field, condition=None):
+        return sum(float(r.get(field) or 0) for r in rows if condition is None or condition(r))
+
+    outstanding_salary = total(salary, "amount_due") - total(salary, "amount_paid")
+    outstanding_rent = total(rent, "amount_due") - total(rent, "amount_paid")
+    unpaid_utilities = total(utilities, "amount") - total(utilities, "amount") if False else total(
+        utilities, "amount", lambda r: str(r.get("status", "")).lower() != "paid")
+    unpaid_office = total(office, "amount", lambda r: str(r.get("status", "")).lower() != "paid")
+    cash_in = total(fund, "amount", lambda r: str(r.get("transaction_type", "")).upper() == "IN")
+    cash_out = total(fund, "amount", lambda r: str(r.get("transaction_type", "")).upper() == "OUT")
+    cash_balance = cash_in - cash_out
+
+    metrics = [
+        ("Active employees", sum(bool(r.get("is_active")) for r in employee)),
+        ("Active drivers", sum(bool(r.get("is_active")) for r in drivers)),
+        ("Salary outstanding", money(outstanding_salary)),
+        ("Rent outstanding", money(outstanding_rent)),
+        ("Unpaid utilities", money(unpaid_utilities)),
+        ("Unpaid office expenses", money(unpaid_office)),
+        ("Driver advances", money(total(advances, "amount"))),
+        ("Petty cash balance", money(cash_balance)),
+    ]
+    cols = st.columns(4)
+    for i, (label, value) in enumerate(metrics):
+        cols[i % 4].metric(label, value)
+
+    st.subheader("Payment overview")
+    overview = pd.DataFrame([
+        {"Category": "Salaries", "Outstanding (SAR)": max(0, outstanding_salary)},
+        {"Category": "Rent", "Outstanding (SAR)": max(0, outstanding_rent)},
+        {"Category": "Utilities", "Outstanding (SAR)": unpaid_utilities},
+        {"Category": "Office expenses", "Outstanding (SAR)": unpaid_office},
+    ])
+    st.bar_chart(overview.set_index("Category"))
+
+    st.subheader("Upcoming and overdue items")
+    notices = build_notifications()
+    if notices:
+        st.dataframe(pd.DataFrame(notices).drop(columns=["Priority"]), use_container_width=True, hide_index=True)
+    else:
+        st.success("No payments or reminders are due within the next 7 days.")
+
+    st.caption(f"Dashboard date: {today.isoformat()} · Amounts are shown in SAR.")
+
+# -------------------------------------------------------------------
+# Navigation
+# -------------------------------------------------------------------
+st.sidebar.title("AGC Management")
+page = st.sidebar.radio("Navigation", ["Dashboard", "Notifications"] + list(MODULES.keys()))
+if page == "Dashboard":
+    dashboard()
+elif page == "Notifications":
+    st.title("🔔 Notifications")
+    notices = build_notifications()
+    if notices:
+        st.dataframe(pd.DataFrame(notices).drop(columns=["Priority"]), use_container_width=True, hide_index=True)
+    else:
+        st.success("No upcoming or overdue items.")
+else:
+    module_page(page, MODULES[page])
