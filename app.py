@@ -20,7 +20,7 @@ IQAMA_RENEWAL_OPTIONS = {
 
 
 # =========================================================
-# CONFIGURATION & SUPABASE CLIENT
+# SUPABASE CONNECTION
 # =========================================================
 @st.cache_resource
 def connect_supabase():
@@ -171,11 +171,15 @@ def notify_error(prefix, exc):
     st.error(f"{prefix}: {exc}")
 
 
-def sar(amount):
+def to_float(value):
     try:
-        return f"SAR {float(amount or 0):,.2f}"
+        return float(value or 0)
     except (TypeError, ValueError):
-        return "SAR 0.00"
+        return 0.0
+
+
+def sar(amount):
+    return f"SAR {to_float(amount):,.2f}"
 
 
 def as_date(value):
@@ -211,7 +215,8 @@ def serialize_payload(payload):
 
 def get_data(table, limit=2000, silent=False):
     try:
-        return supabase.table(table).select("*").limit(limit).execute().data or []
+        resp = supabase.table(table).select("*").limit(limit).execute()
+        return resp.data or []
     except Exception as exc:
         if not silent:
             notify_error(f"Could not read {table}", exc)
@@ -224,16 +229,10 @@ def fk_options(table):
 
 
 def display_label(row, fallback):
-    return str(
-        row.get("full_name")
-        or row.get("accommodation_name")
-        or row.get("vehicle_name")
-        or row.get("title")
-        or row.get("plate_number")
-        or row.get("bill_type")
-        or row.get("category")
-        or fallback
-    )
+    for key in ("full_name", "accommodation_name", "vehicle_name", "title", "plate_number", "bill_type", "category"):
+        if row.get(key):
+            return str(row[key])
+    return str(fallback)
 
 
 def _flash(message, kind="success"):
@@ -251,9 +250,9 @@ def _stable_rows(rows):
     return sorted(rows, key=lambda r: (str(r.get("created_at") or ""), str(r.get("id") or "")))
 
 
-def compute_salary_status(amount_due, amount_paid):
-    due = round(float(amount_due or 0), 2)
-    paid = round(float(amount_paid or 0), 2)
+def compute_status(amount_due, amount_paid):
+    due = round(to_float(amount_due), 2)
+    paid = round(to_float(amount_paid), 2)
     if paid <= 0:
         return "Unpaid"
     if paid >= due:
@@ -263,9 +262,16 @@ def compute_salary_status(amount_due, amount_paid):
 
 def get_employee_advance_summary(employee_id, advances_rows=None):
     rows = advances_rows if advances_rows is not None else get_data("employee_advances", silent=True)
-    emp_rows = [r for r in rows if str(r.get("employee_id")) == str(employee_id)]
-    taken = sum(float(r.get("amount") or 0) for r in emp_rows if r.get("transaction_type") == "ADVANCE")
-    deducted = sum(float(r.get("amount") or 0) for r in emp_rows if r.get("transaction_type") == "DEDUCTION")
+    taken = 0.0
+    deducted = 0.0
+    for r in rows:
+        if str(r.get("employee_id")) != str(employee_id):
+            continue
+        amt = to_float(r.get("amount"))
+        if r.get("transaction_type") == "ADVANCE":
+            taken += amt
+        elif r.get("transaction_type") == "DEDUCTION":
+            deducted += amt
     remaining = max(0.0, round(taken - deducted, 2))
     return round(taken, 2), round(deducted, 2), remaining
 
@@ -281,10 +287,7 @@ def render_field(field, kind, key, old=None, required=False):
         return st.text_input(label, value="" if value is None else str(value), key=key)
     if kind == "number":
         default_num = IQAMA_MONTHLY_RATE if (field == "monthly_iqama_expense" and value is None) else 0.0
-        try:
-            initial = float(value) if value is not None else default_num
-        except (TypeError, ValueError):
-            initial = default_num
+        initial = to_float(value) if value is not None else default_num
         return st.number_input(label, min_value=0.0, value=initial, step=50.0, key=key)
     if kind == "date":
         parsed = as_date(value)
@@ -360,12 +363,13 @@ def build_notifications():
             exp = as_date(r.get("iqama_expiry"))
             if exp:
                 days = (exp - today).days
+                emp_name = r.get("full_name", "Employee")
                 if days <= 0:
                     add_item(
                         "Iqama Renewal Required",
                         "Iqama Renewal Required — Action Needed",
                         exp,
-                        f"Employee: {r.get('full_name', 'Employee')} — Renew in Additional Expenses",
+                        f"Employee: {emp_name} — Renew in Additional Expenses",
                         window_days=30,
                     )
                 elif days <= 30:
@@ -373,32 +377,22 @@ def build_notifications():
                         "Iqama Expiry",
                         "Iqama Expiring Soon",
                         exp,
-                        f"Employee: {r.get('full_name', 'Employee')}",
+                        f"Employee: {emp_name}",
                         window_days=30,
                     )
 
     employee_map = {str(r.get("id")): r.get("full_name", "Employee") for r in employees}
     for r in get_data("salary_records"):
         emp = employee_map.get(str(r.get("employee_id")), "Employee")
-        outstanding = max(0.0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
+        outstanding = max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
         st_label = str(r.get("status") or "Unpaid")
         if outstanding > 0 and st_label.lower() != "paid":
             cat = "Partial Salary" if st_label.lower() == "partial" else "Unpaid Salary"
-            add_item(
-                cat,
-                f"{cat} ({r.get('salary_month', '')})",
-                r.get("due_date"),
-                f"Employee: {emp}",
-                outstanding,
-                st_label,
-            )
+            add_item(cat, f"{cat} ({r.get('salary_month', '')})", r.get("due_date"), f"Employee: {emp}", outstanding, st_label)
 
-    accommodation_map = {
-        str(r.get("id")): r.get("accommodation_name", "Accommodation")
-        for r in get_data("accommodations")
-    }
+    accommodation_map = {str(r.get("id")): r.get("accommodation_name", "Accommodation") for r in get_data("accommodations")}
     for r in get_data("accommodation_rent_payments"):
-        outstanding = max(0.0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
+        outstanding = max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
         if outstanding > 0:
             name = accommodation_map.get(str(r.get("accommodation_id")), "Accommodation")
             add_item("Rent Due", "Rent Payment Due", r.get("due_date"), name, outstanding, r.get("status"))
@@ -406,34 +400,15 @@ def build_notifications():
     for r in get_data("utility_bills"):
         if str(r.get("status", "")).lower() != "paid":
             name = accommodation_map.get(str(r.get("accommodation_id")), "Accommodation")
-            add_item(
-                "Utility Bill",
-                f"Utility Bill: {r.get('bill_type', 'Utility')}",
-                r.get("due_date"),
-                name,
-                r.get("amount"),
-                r.get("status"),
-            )
+            add_item("Utility Bill", f"Utility Bill: {r.get('bill_type', 'Utility')}", r.get("due_date"), name, r.get("amount"), r.get("status"))
 
     for r in get_data("office_expenses"):
         if str(r.get("status", "")).lower() != "paid":
-            add_item(
-                "Office Expense",
-                f"Office Expense: {r.get('category', 'Expense')}",
-                r.get("due_date"),
-                r.get("description") or "Office expense",
-                r.get("amount"),
-                r.get("status"),
-            )
+            add_item("Office Expense", f"Office Expense: {r.get('category', 'Expense')}", r.get("due_date"), r.get("description") or "Office expense", r.get("amount"), r.get("status"))
 
     for r in get_data("reminders"):
         if not r.get("is_completed"):
-            add_item(
-                "Reminder",
-                r.get("title", "Reminder"),
-                r.get("reminder_date"),
-                r.get("message") or "General reminder",
-            )
+            add_item("Reminder", r.get("title", "Reminder"), r.get("reminder_date"), r.get("message") or "General reminder")
 
     return sorted(items, key=lambda x: x["due_date"])
 
@@ -472,6 +447,7 @@ def process_email_notifications(items, guardian_rows):
         days = item["days"]
         if days not in (20, 15, 7, 0) and days >= 0:
             continue
+        amt_text = sar(item["amount"]) if item["amount"] is not None else "Not specified"
         body = (
             f"AGC Management System Reminder\n\n"
             f"Category: {item['category']}\n"
@@ -479,21 +455,13 @@ def process_email_notifications(items, guardian_rows):
             f"Details: {item['detail']}\n"
             f"Due Date: {item['due_date']}\n"
             f"Status: {item['timing']}\n"
-            f"Amount: {sar(item['amount']) if item['amount'] is not None else 'Not specified'}\n"
+            f"Amount: {amt_text}\n"
         )
         for recipient in recipients:
             key = notification_key(item, recipient)
             try:
-                existing = (
-                    supabase.table("notification_log")
-                    .select("id")
-                    .eq("event_key", key)
-                    .limit(1)
-                    .execute()
-                    .data
-                    or []
-                )
-                if existing:
+                resp = supabase.table("notification_log").select("id").eq("event_key", key).limit(1).execute()
+                if resp.data:
                     continue
                 ok, _ = send_email(f"AGC Reminder: {item['title']}", body, [recipient])
                 if ok:
@@ -535,29 +503,51 @@ def dashboard_page():
     total_drivers = len(drivers)
 
     # Monthly Salary strictly excludes Iqama Renewal Fees
-    monthly_salary_total = sum(
-        float(e.get("monthly_salary") or 0) for e in employees if e.get("is_active", True)
-    )
-    salary_outstanding = sum(
-        max(0.0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
-        for r in salary_records
-        if str(r.get("status", "")).lower() != "paid"
-    )
+    monthly_salary_total = 0.0
+    for e in employees:
+        if e.get("is_active", True):
+            monthly_salary_total += to_float(e.get("monthly_salary"))
 
-    adv_taken = sum(float(r.get("amount") or 0) for r in emp_advances if r.get("transaction_type") == "ADVANCE")
-    adv_deducted = sum(float(r.get("amount") or 0) for r in emp_advances if r.get("transaction_type") == "DEDUCTION")
+    salary_outstanding = 0.0
+    for r in salary_records:
+        if str(r.get("status", "")).lower() != "paid":
+            salary_outstanding += max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
+
+    adv_taken = 0.0
+    adv_deducted = 0.0
+    for r in emp_advances:
+        if r.get("transaction_type") == "ADVANCE":
+            adv_taken += to_float(r.get("amount"))
+        elif r.get("transaction_type") == "DEDUCTION":
+            adv_deducted += to_float(r.get("amount"))
     employee_advances_balance = max(0.0, adv_taken - adv_deducted)
 
-    petty_in = sum(float(r.get("amount") or 0) for r in petty_fund if str(r.get("transaction_type")).upper() == "IN")
-    petty_out = sum(float(r.get("amount") or 0) for r in petty_fund if str(r.get("transaction_type")).upper() == "OUT")
-    petty_expenses_total = sum(float(r.get("amount") or 0) for r in petty_exp)
+    petty_in = 0.0
+    petty_out = 0.0
+    for r in petty_fund:
+        tx_type = str(r.get("transaction_type", "")).upper()
+        if tx_type == "IN":
+            petty_in += to_float(r.get("amount"))
+        elif tx_type == "OUT":
+            petty_out += to_float(r.get("amount"))
+
+    petty_expenses_total = sum(to_float(r.get("amount")) for r in petty_exp)
     petty_cash_balance = petty_in - petty_out - petty_expenses_total
 
-    accommodation_expenses = sum(float(r.get("amount_paid") or 0) for r in rent_payments)
-    outstanding_rent = sum(
-        max(0.0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
-        for r in rent_payments
-        if str(r.get("status", "")).lower() != "paid"
-    )
-    utility_bills_total = sum(float(r.get("amount") or 0) for r in utility_bills)
-    office_expenses_total = sum(float
+    accommodation_expenses = sum(to_float(r.get("amount_paid")) for r in rent_payments)
+    outstanding_rent = 0.0
+    for r in rent_payments:
+        if str(r.get("status", "")).lower() != "paid":
+            outstanding_rent += max(0.0, to_float(r.get("amount_due")) - to_float(r.get("amount_paid")))
+
+    utility_bills_total = sum(to_float(r.get("amount")) for r in utility_bills)
+    office_expenses_total = sum(to_float(r.get("amount")) for r in office_expenses)
+
+    # Additional Expenses (Iqama Renewal Fees — strictly separate from Salary)
+    additional_expenses_total = sum(to_float(r.get("required_amount")) for r in iqama_renewals)
+    iqama_renewal_outstanding = 0.0
+    for r in iqama_renewals:
+        if str(r.get("status", "")).lower() != "paid":
+            iqama_renewal_outstanding += max(0.0, to_float(r.get("required_amount")) - to_float(r.get("amount_paid")))
+
+    upcoming_reminders_count = sum(1 for r in remi
