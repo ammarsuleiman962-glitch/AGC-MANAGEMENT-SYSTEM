@@ -1,7 +1,7 @@
 import calendar
 import smtplib
 import uuid
-from datetime import date, timedelta
+from datetime import date
 from email.message import EmailMessage
 
 import pandas as pd
@@ -384,7 +384,14 @@ def build_notifications():
         st_label = str(r.get("status") or "Unpaid")
         if outstanding > 0 and st_label.lower() != "paid":
             cat = "Partial Salary" if st_label.lower() == "partial" else "Unpaid Salary"
-            add_item(cat, f"{cat} ({r.get('salary_month', '')})", r.get("due_date"), f"Employee: {emp}", outstanding, st_label)
+            add_item(
+                cat,
+                f"{cat} ({r.get('salary_month', '')})",
+                r.get("due_date"),
+                f"Employee: {emp}",
+                outstanding,
+                st_label,
+            )
 
     accommodation_map = {
         str(r.get("id")): r.get("accommodation_name", "Accommodation")
@@ -399,15 +406,34 @@ def build_notifications():
     for r in get_data("utility_bills"):
         if str(r.get("status", "")).lower() != "paid":
             name = accommodation_map.get(str(r.get("accommodation_id")), "Accommodation")
-            add_item("Utility Bill", f"Utility Bill: {r.get('bill_type', 'Utility')}", r.get("due_date"), name, r.get("amount"), r.get("status"))
+            add_item(
+                "Utility Bill",
+                f"Utility Bill: {r.get('bill_type', 'Utility')}",
+                r.get("due_date"),
+                name,
+                r.get("amount"),
+                r.get("status"),
+            )
 
     for r in get_data("office_expenses"):
         if str(r.get("status", "")).lower() != "paid":
-            add_item("Office Expense", f"Office Expense: {r.get('category', 'Expense')}", r.get("due_date"), r.get("description") or "Office expense", r.get("amount"), r.get("status"))
+            add_item(
+                "Office Expense",
+                f"Office Expense: {r.get('category', 'Expense')}",
+                r.get("due_date"),
+                r.get("description") or "Office expense",
+                r.get("amount"),
+                r.get("status"),
+            )
 
     for r in get_data("reminders"):
         if not r.get("is_completed"):
-            add_item("Reminder", r.get("title", "Reminder"), r.get("reminder_date"), r.get("message") or "General reminder")
+            add_item(
+                "Reminder",
+                r.get("title", "Reminder"),
+                r.get("reminder_date"),
+                r.get("message") or "General reminder",
+            )
 
     return sorted(items, key=lambda x: x["due_date"])
 
@@ -497,7 +523,6 @@ def dashboard_page():
     emp_advances = get_data("employee_advances", silent=True)
     petty_fund = get_data("petty_cash_fund")
     petty_exp = get_data("petty_cash_expenses")
-    accommodations = get_data("accommodations")
     rent_payments = get_data("accommodation_rent_payments")
     utility_bills = get_data("utility_bills")
     office_expenses = get_data("office_expenses")
@@ -535,9 +560,4 @@ def dashboard_page():
         if str(r.get("status", "")).lower() != "paid"
     )
     utility_bills_total = sum(float(r.get("amount") or 0) for r in utility_bills)
-    office_expenses_total = sum(float(r.get("amount") or 0) for r in office_expenses)
-
-    # Additional Expenses (Iqama Renewal Fees — strictly separate from Salary)
-    additional_expenses_total = sum(float(r.get("required_amount") or 0) for r in iqama_renewals)
-    iqama_renewal_outstanding = sum(
-        max(0.0, float(r.get("required_amount") or 0) - float(r.get("amount_paid") or 0))
+    office_expenses_total = sum(float
