@@ -1,481 +1,497 @@
 import streamlit as st
 import pandas as pd
+import smtplib
+import uuid
+from email.message import EmailMessage
+from datetime import date, datetime, timedelta
 from supabase import create_client
-from datetime import date, datetime
-from calendar import monthrange
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="AGC Management", layout="wide")
+st.set_page_config(page_title="AGC Management System", page_icon="🏢", layout="wide")
 
+# =========================================================
+# CONFIGURATION
+# =========================================================
 @st.cache_resource
-def get_db():
-    return create_client(
-        st.secrets["SUPABASE_URL"],
-        st.secrets["SUPABASE_KEY"]
-    )
+def connect_supabase():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-db = get_db()
+supabase = connect_supabase()
 
-TABLES = [
-    "employees", "salary_records", "employee_advances",
-    "salary_settlements", "vehicles", "drivers", "driver_advances",
-    "petty_cash_fund", "petty_cash_expenses", "accommodations",
-    "accommodation_rent_payments", "utility_bills", "office_expenses",
-    "iqama_renewals", "iqama_renewal_payments", "reminders",
-    "guardian_contacts"
-]
+MODULES = {
+    "Employees": {"table": "employees", "fields": [
+        ("full_name", "text", True), ("mobile", "text", False),
+        ("iqama_number", "text", False), ("iqama_expiry", "date", False),
+        ("job_title", "text", False), ("monthly_salary", "number", True),
+        ("monthly_iqama_expense", "number", True), ("is_active", "boolean", True),
+        ("notes", "text", False)]},
+    "Salary Records": {"table": "salary_records", "fields": [
+        ("employee_id", "fk:employees", True), ("salary_month", "date", True),
+        ("amount_due", "number", True), ("amount_paid", "number", True),
+        ("due_date", "date", True), ("payment_date", "date", False),
+        ("status", "select:Unpaid,Partial,Paid", True), ("notes", "text", False)]},
+    "Vehicles": {"table": "vehicles", "fields": [
+        ("vehicle_name", "text", True), ("plate_number", "text", True),
+        ("notes", "text", False)]},
+    "Drivers": {"table": "drivers", "fields": [
+        ("full_name", "text", True), ("mobile", "text", False),
+        ("notes", "text", False), ("is_active", "boolean", True)]},
+    "Driver Advances": {"table": "driver_advances", "fields": [
+        ("driver_id", "fk:drivers", True), ("vehicle_id", "fk:vehicles", False),
+        ("amount", "number", True), ("advance_date", "date", True),
+        ("description", "text", False)]},
+    "Petty Cash Fund": {"table": "petty_cash_fund", "fields": [
+        ("transaction_type", "select:IN,OUT", True), ("amount", "number", True),
+        ("transaction_date", "date", True), ("description", "text", False)]},
+    "Petty Cash Expenses": {"table": "petty_cash_expenses", "fields": [
+        ("driver_id", "fk:drivers", False), ("vehicle_id", "fk:vehicles", False),
+        ("category", "select:Maintenance,Oil Change,Tyre Change,Fuel,Other", True),
+        ("amount", "number", True), ("expense_date", "date", True),
+        ("description", "text", False)]},
+    "Accommodations": {"table": "accommodations", "fields": [
+        ("accommodation_name", "text", True), ("address", "text", False),
+        ("monthly_rent", "number", True),
+        ("payment_frequency", "select:Monthly,Quarterly,Half-Yearly,Yearly", True),
+        ("next_due_date", "date", False), ("notes", "text", False),
+        ("is_active", "boolean", True)]},
+    "Rent Payments": {"table": "accommodation_rent_payments", "fields": [
+        ("accommodation_id", "fk:accommodations", True), ("amount_due", "number", True),
+        ("amount_paid", "number", True), ("due_date", "date", True),
+        ("payment_date", "date", False), ("status", "select:Unpaid,Partial,Paid", True),
+        ("notes", "text", False)]},
+    "Utility Bills": {"table": "utility_bills", "fields": [
+        ("accommodation_id", "fk:accommodations", False), ("bill_type", "text", True),
+        ("amount", "number", True), ("bill_date", "date", False), ("due_date", "date", True),
+        ("payment_date", "date", False), ("status", "select:Unpaid,Pending,Paid", True),
+        ("description", "text", False)]},
+    "Office Expenses": {"table": "office_expenses", "fields": [
+        ("category", "text", True), ("amount", "number", True),
+        ("expense_date", "date", True), ("due_date", "date", False),
+        ("payment_date", "date", False), ("status", "select:Unpaid,Pending,Paid", True),
+        ("description", "text", False)]},
+    "Reminders": {"table": "reminders", "fields": [
+        ("title", "text", True), ("message", "text", False),
+        ("reminder_date", "date", True), ("related_type", "text", False),
+        ("related_id", "text", False), ("is_completed", "boolean", True)]},
+}
 
-def get_data(table):
+def notify_error(prefix, exc):
+    st.error(f"{prefix}: {exc}")
+
+def get_data(table, limit=2000):
     try:
-        return db.table(table).select("*").execute().data or []
-    except Exception as e:
-        st.error(f"{table}: {e}")
+        return supabase.table(table).select("*").limit(limit).execute().data or []
+    except Exception as exc:
+        notify_error(f"Could not read {table}", exc)
         return []
 
-def insert(table, data):
-    try:
-        db.table(table).insert(data).execute()
-        st.success("Saved successfully")
-        st.rerun()
-    except Exception as e:
-        st.error(str(e))
+def fk_options(table):
+    rows = get_data(table)
+    result = {}
+    for row in rows:
+        if row.get("id") is not None:
+            result[str(row["id"])] = row
+    return result
 
-def update(table, row_id, data):
-    try:
-        db.table(table).update(data).eq("id", row_id).execute()
-        st.success("Updated successfully")
-        st.rerun()
-    except Exception as e:
-        st.error(str(e))
+def display_label(row, fallback):
+    return str(row.get("full_name") or row.get("accommodation_name") or
+               row.get("vehicle_name") or row.get("title") or
+               row.get("plate_number") or fallback)
 
-def delete(table, row_id):
-    try:
-        db.table(table).delete().eq("id", row_id).execute()
-        st.success("Deleted")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Cannot delete this record: {e}")
+def render_field(field, kind, key, old=None):
+    old = old or {}
+    value = old.get(field)
+    label = field.replace("_", " ").title()
 
-def frame(table):
-    return pd.DataFrame(get_data(table))
-
-def money(value):
-    return f"SAR {float(value or 0):,.2f}"
-
-# ---------------- SIDEBAR ----------------
-st.sidebar.title("AGC Management")
-page = st.sidebar.radio("Menu", [
-    "Dashboard",
-    "Employees",
-    "Salary & Advances",
-    "Additional Expenses - Iqama",
-    "Other Modules"
-])
-
-# ---------------- DASHBOARD ----------------
-if page == "Dashboard":
-    st.title("Management Dashboard")
-
-    employees = frame("employees")
-    salaries = frame("salary_records")
-    advances = frame("employee_advances")
-    renewals = frame("iqama_renewals")
-    vehicles = frame("vehicles")
-    drivers = frame("drivers")
-    rent = frame("accommodation_rent_payments")
-    utilities = frame("utility_bills")
-    office = frame("office_expenses")
-    reminders = frame("reminders")
-
-    def total(df, col):
-        return pd.to_numeric(df[col], errors="coerce").fillna(0).sum() if col in df else 0
-
-    active = employees[
-        employees["is_active"] == True
-    ] if not employees.empty and "is_active" in employees else employees
-
-    salary_due = total(salaries, "amount_due")
-    salary_paid = total(salaries, "amount_paid")
-    salary_outstanding = max(0, salary_due - salary_paid)
-
-    advance_total = total(advances, "amount")
-    iqama_outstanding = total(renewals, "outstanding_amount")
-
-    rent_outstanding = (
-        total(rent, "amount_due") - total(rent, "amount_paid")
-    )
-    utility_outstanding = total(
-        utilities[utilities["status"] != "Paid"], "amount"
-    ) if not utilities.empty and "status" in utilities else 0
-
-    office_outstanding = total(
-        office[office["status"] != "Paid"], "amount"
-    ) if not office.empty and "status" in office else 0
-
-    cols = st.columns(4)
-    cols[0].metric("Employees", len(employees))
-    cols[1].metric("Active Employees", len(active))
-    cols[2].metric("Vehicles", len(vehicles))
-    cols[3].metric("Drivers", len(drivers))
-
-    cols = st.columns(4)
-    cols[0].metric("Monthly Salary", money(total(active, "monthly_salary")))
-    cols[1].metric("Salary Outstanding", money(salary_outstanding))
-    cols[2].metric("Employee Advances", money(advance_total))
-    cols[3].metric("Iqama Outstanding", money(iqama_outstanding))
-
-    cols = st.columns(4)
-    cols[0].metric("Rent Outstanding", money(rent_outstanding))
-    cols[1].metric("Utility Bills", money(utility_outstanding))
-    cols[2].metric("Office Expenses Outstanding", money(office_outstanding))
-    cols[3].metric("Reminders", len(reminders))
-
-    st.subheader("Recent Salary Records")
-    st.dataframe(salaries.tail(10), use_container_width=True)
-
-# ---------------- EMPLOYEES ----------------
-elif page == "Employees":
-    st.title("Employee Management")
-    df = frame("employees")
-
-    with st.expander("Add Employee"):
-        with st.form("employee_form"):
-            name = st.text_input("Full Name")
-            mobile = st.text_input("Mobile")
-            iqama = st.text_input("Iqama Number")
-            expiry = st.date_input("Iqama Expiry", value=None)
-            job = st.text_input("Job Title")
-            salary = st.number_input("Monthly Salary", min_value=0.0)
-            iqama_cost = st.number_input("Monthly Iqama Expense", min_value=0.0)
-            notes = st.text_area("Notes")
-            active = st.checkbox("Active", value=True)
-
-            if st.form_submit_button("Save Employee"):
-                if name.strip():
-                    insert("employees", {
-                        "full_name": name,
-                        "mobile": mobile,
-                        "iqama_number": iqama,
-                        "iqama_expiry": str(expiry) if expiry else None,
-                        "job_title": job,
-                        "monthly_salary": salary,
-                        "monthly_iqama_expense": iqama_cost,
-                        "notes": notes,
-                        "is_active": active
-                    })
-                else:
-                    st.warning("Enter employee name")
-
-    st.subheader("Employee List")
-    st.dataframe(df, use_container_width=True)
-
-    if not df.empty:
-        selected = st.selectbox(
-            "Select Employee",
-            df.to_dict("records"),
-            format_func=lambda x: x["full_name"]
+    if kind == "text":
+        return st.text_input(label, value="" if value is None else str(value), key=key)
+    if kind == "number":
+        try:
+            initial = float(value or 0)
+        except (TypeError, ValueError):
+            initial = 0.0
+        return st.number_input(label, min_value=0.0, value=initial, step=1.0, key=key)
+    if kind == "date":
+        try:
+            initial = date.fromisoformat(str(value)[:10]) if value else date.today()
+        except ValueError:
+            initial = date.today()
+        return st.date_input(label, value=initial, key=key)
+    if kind == "boolean":
+        return st.checkbox(label, value=True if value is None else bool(value), key=key)
+    if kind.startswith("select:"):
+        choices = kind.split(":", 1)[1].split(",")
+        index = choices.index(value) if value in choices else 0
+        return st.selectbox(label, choices, index=index, key=key)
+    if kind.startswith("fk:"):
+        target = kind.split(":", 1)[1]
+        options = fk_options(target)
+        if not options:
+            st.warning(f"No records found in {target}. Add the related record first.")
+            return None
+        ids = list(options.keys())
+        selected = str(value) if value is not None else ""
+        index = ids.index(selected) if selected in ids else 0
+        chosen = st.selectbox(
+            label, ids, index=index,
+            format_func=lambda item: display_label(options[item], item),
+            key=key
         )
-        with st.expander("Edit / Delete Employee"):
-            new_name = st.text_input("Name", selected["full_name"])
-            new_mobile = st.text_input("Mobile", selected.get("mobile") or "")
-            new_salary = st.number_input(
-                "Monthly Salary",
-                min_value=0.0,
-                value=float(selected.get("monthly_salary") or 0)
+        return chosen
+    return None
+
+def module_page(name, config):
+    table = config["table"]
+    st.title(name)
+    add_tab, view_tab, delete_tab = st.tabs(["Add New", "View / Edit", "Delete"])
+
+    with add_tab:
+        st.subheader(f"Add {name}")
+        with st.form(f"add_form_{table}"):
+            values = {}
+            for field, kind, required in config["fields"]:
+                values[field] = render_field(field, kind, f"add_{table}_{field}")
+            submitted = st.form_submit_button("Save Record", type="primary")
+        if submitted:
+            missing = [f.replace("_", " ").title() for f, k, req in config["fields"]
+                       if req and (values.get(f) is None or values.get(f) == "")]
+            if missing:
+                st.error("Please complete required fields: " + ", ".join(missing))
+            else:
+                try:
+                    supabase.table(table).insert(values).execute()
+                    st.success("Record saved successfully.")
+                    st.rerun()
+                except Exception as exc:
+                    notify_error("Save failed", exc)
+
+    rows = get_data(table)
+    with view_tab:
+        st.subheader(f"{name} Records")
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            record_ids = [str(r["id"]) for r in rows]
+            selected_id = st.selectbox(
+                "Select record to edit", record_ids,
+                format_func=lambda rid: display_label(
+                    next(x for x in rows if str(x["id"]) == rid), rid
+                ),
+                key=f"edit_select_{table}"
             )
-            if st.button("Update Employee"):
-                update("employees", selected["id"], {
-                    "full_name": new_name,
-                    "mobile": new_mobile,
-                    "monthly_salary": new_salary
-                })
-            if st.button("Delete Employee"):
-                st.warning("Deletion may be blocked if related records exist.")
-                if st.checkbox("Confirm employee deletion"):
-                    delete("employees", selected["id"])
+            old = next(r for r in rows if str(r["id"]) == selected_id)
+            with st.form(f"edit_form_{table}"):
+                updated = {}
+                for field, kind, required in config["fields"]:
+                    updated[field] = render_field(
+                        field, kind, f"edit_{table}_{field}", old
+                    )
+                save = st.form_submit_button("Update Record", type="primary")
+            if save:
+                missing = [f.replace("_", " ").title() for f, k, req in config["fields"]
+                           if req and (updated.get(f) is None or updated.get(f) == "")]
+                if missing:
+                    st.error("Please complete required fields: " + ", ".join(missing))
+                else:
+                    try:
+                        supabase.table(table).update(updated).eq("id", selected_id).execute()
+                        st.success("Record updated.")
+                        st.rerun()
+                    except Exception as exc:
+                        notify_error("Update failed", exc)
+        else:
+            st.info("No records found.")
 
-# ---------------- SALARY & ADVANCES ----------------
-elif page == "Salary & Advances":
-    st.title("Salary & Employee Advances")
+    with delete_tab:
+        st.subheader(f"Delete {name} Record")
+        if rows:
+            delete_id = st.selectbox(
+                "Select record to delete", [str(r["id"]) for r in rows],
+                format_func=lambda rid: display_label(
+                    next(x for x in rows if str(x["id"]) == rid), rid
+                ),
+                key=f"delete_select_{table}"
+            )
+            confirm = st.checkbox("I confirm that I want to permanently delete this record.",
+                                  key=f"confirm_delete_{table}")
+            if st.button("Delete Record", type="primary", key=f"delete_button_{table}"):
+                if not confirm:
+                    st.warning("Please confirm deletion.")
+                else:
+                    try:
+                        supabase.table(table).delete().eq("id", delete_id).execute()
+                        st.success("Record deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        notify_error("Delete failed", exc)
+        else:
+            st.info("No records found.")
 
-    employees = get_data("employees")
-    if not employees:
-        st.warning("Add employees first.")
-        st.stop()
+# =========================================================
+# NOTIFICATIONS
+# =========================================================
+def as_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
-    emp = st.selectbox(
-        "Employee",
-        employees,
-        format_func=lambda x: x["full_name"]
-    )
+def build_notifications():
+    today = date.today()
+    items = []
 
-    st.subheader("Give Employee Advance")
-    with st.form("advance_form"):
-        amount = st.number_input("Advance Amount", min_value=0.01)
-        adv_date = st.date_input("Advance Date")
-        description = st.text_input("Description")
-        if st.form_submit_button("Save Advance"):
-            insert("employee_advances", {
-                "employee_id": emp["id"],
-                "transaction_type": "ADVANCE",
-                "amount": amount,
-                "transaction_date": str(adv_date),
-                "description": description
+    def add_item(title, due, detail, amount=None, status=None):
+        due_date = as_date(due)
+        if not due_date:
+            return
+        if status and str(status).lower() == "paid":
+            return
+        days = (due_date - today).days
+        if days <= 20:
+            if days > 0:
+                timing = f"Due in {days} day(s)"
+            elif days == 0:
+                timing = "Due today"
+            else:
+                timing = f"Overdue by {abs(days)} day(s)"
+            items.append({
+                "title": title, "due_date": due_date, "days": days,
+                "timing": timing, "detail": detail,
+                "amount": amount
             })
 
-    st.subheader("Create Monthly Salary Record")
-    with st.form("salary_form"):
-        month = st.date_input("Salary Month", value=date.today().replace(day=1))
-        due = st.number_input(
-            "Salary Due",
-            min_value=0.0,
-            value=float(emp.get("monthly_salary") or 0)
-        )
-        due_date = st.date_input("Payment Due Date")
-        if st.form_submit_button("Create Salary"):
-            month_start = month.replace(day=1)
-            existing = db.table("salary_records").select("id").eq(
-                "employee_id", emp["id"]
-            ).eq("salary_month", str(month_start)).execute().data
-
-            if existing:
-                st.warning("Salary record already exists for this month.")
-            else:
-                insert("salary_records", {
-                    "employee_id": emp["id"],
-                    "salary_month": str(month_start),
-                    "amount_due": due,
-                    "amount_paid": 0,
-                    "due_date": str(due_date),
-                    "status": "Unpaid"
-                })
-
-    st.subheader("Salary Payment")
-    salaries = db.table("salary_records").select("*").eq(
-        "employee_id", emp["id"]
-    ).execute().data
-
-    if salaries:
-        salary = st.selectbox(
-            "Select Salary Record",
-            salaries,
-            format_func=lambda x: f"{x['salary_month']} - {money(x['amount_due'])}"
-        )
-
-        with st.form("settlement_form"):
-            advance_deducted = st.number_input("Advance Deduction", min_value=0.0)
-            cash_paid = st.number_input("Cash Paid", min_value=0.0)
-            payment_date = st.date_input("Payment Date")
-            notes = st.text_input("Notes")
-
-            if st.form_submit_button("Settle Salary"):
-                total_paid = advance_deducted + cash_paid
-                remaining = float(salary["amount_due"]) - float(salary["amount_paid"])
-
-                if total_paid <= 0 or total_paid > remaining:
-                    st.error(f"Payment must be greater than zero and not exceed {money(remaining)}.")
-                else:
-                    new_paid = float(salary["amount_paid"]) + total_paid
-                    status = "Paid" if new_paid >= float(salary["amount_due"]) else "Partial"
-
-                    try:
-                        db.table("salary_settlements").insert({
-                            "salary_record_id": salary["id"],
-                            "employee_id": emp["id"],
-                            "advance_deducted": advance_deducted,
-                            "cash_paid": cash_paid,
-                            "total_settled": total_paid,
-                            "payment_date": str(payment_date),
-                            "notes": notes
-                        }).execute()
-
-                        db.table("salary_records").update({
-                            "amount_paid": new_paid,
-                            "payment_date": str(payment_date),
-                            "status": status
-                        }).eq("id", salary["id"]).execute()
-
-                        if advance_deducted > 0:
-                            db.table("employee_advances").insert({
-                                "employee_id": emp["id"],
-                                "transaction_type": "DEDUCTION",
-                                "amount": advance_deducted,
-                                "transaction_date": str(payment_date),
-                                "salary_record_id": salary["id"],
-                                "description": "Salary advance deduction"
-                            }).execute()
-
-                        st.success("Salary payment recorded")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Payment could not be completed: {e}")
-
-    st.subheader("Employee Advance History")
-    st.dataframe(
-        frame("employee_advances").query(
-            "employee_id == @emp['id']"
-        ) if not frame("employee_advances").empty else pd.DataFrame(),
-        use_container_width=True
-    )
-
-# ---------------- IQAMA ADDITIONAL EXPENSES ----------------
-elif page == "Additional Expenses - Iqama":
-    st.title("Iqama Renewals")
-    st.info("Iqama fee is SAR 1,500 per month. It is separate from employee salary.")
-
     employees = get_data("employees")
-    if not employees:
-        st.warning("Add employees first.")
-        st.stop()
+    for r in employees:
+        if r.get("is_active", True):
+            add_item("Iqama expiry", r.get("iqama_expiry"),
+                     f"Employee: {r.get('full_name', 'Employee')}")
 
-    emp = st.selectbox(
-        "Employee",
-        employees,
-        format_func=lambda x: x["full_name"]
-    )
+    employee_map = {str(r.get("id")): r.get("full_name", "Employee") for r in employees}
+    for r in get_data("salary_records"):
+        emp = employee_map.get(str(r.get("employee_id")), "Employee")
+        outstanding = max(0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
+        if outstanding > 0:
+            add_item("Salary payment", r.get("due_date"),
+                     f"Employee: {emp}", outstanding, r.get("status"))
 
-    months = st.selectbox("Renewal Period", [3, 6, 9, 12])
-    rate = 1500
-    required = months * rate
+    accommodation_map = {
+        str(r.get("id")): r.get("accommodation_name", "Accommodation")
+        for r in get_data("accommodations")
+    }
+    for r in get_data("accommodation_rent_payments"):
+        outstanding = max(0, float(r.get("amount_due") or 0) - float(r.get("amount_paid") or 0))
+        if outstanding > 0:
+            name = accommodation_map.get(str(r.get("accommodation_id")), "Accommodation")
+            add_item("Rent payment", r.get("due_date"), name, outstanding, r.get("status"))
 
-    st.metric("Required Iqama Fee", money(required))
+    for r in get_data("utility_bills"):
+        if str(r.get("status", "")).lower() != "paid":
+            name = accommodation_map.get(str(r.get("accommodation_id")), "Accommodation")
+            add_item(f"Utility bill: {r.get('bill_type', 'Utility')}", r.get("due_date"),
+                     name, r.get("amount"), r.get("status"))
 
-    with st.form("iqama_form"):
-        renewal_date = st.date_input("Renewal Date")
-        paid = st.number_input("Amount Paid", min_value=0.0, max_value=float(required))
-        notes = st.text_input("Notes")
+    for r in get_data("office_expenses"):
+        if str(r.get("status", "")).lower() != "paid":
+            add_item(f"Office expense: {r.get('category', 'Expense')}", r.get("due_date"),
+                     r.get("description") or "Office expense", r.get("amount"), r.get("status"))
 
-        if st.form_submit_button("Save Renewal"):
-            old_expiry = emp.get("iqama_expiry")
-            base = old_expiry if old_expiry and date.fromisoformat(old_expiry) > renewal_date else str(renewal_date)
-            base_date = date.fromisoformat(base)
+    for r in get_data("reminders"):
+        if not r.get("is_completed"):
+            add_item(r.get("title", "Reminder"), r.get("reminder_date"),
+                     r.get("message") or "General reminder")
 
-            new_month = base_date.month - 1 + months
-            year = base_date.year + new_month // 12
-            month = new_month % 12 + 1
-            day = min(base_date.day, monthrange(year, month)[1])
-            new_expiry = date(year, month, day)
+    return sorted(items, key=lambda x: x["due_date"])
 
-            outstanding = required - paid
-            status = "Paid" if outstanding == 0 else ("Partial" if paid > 0 else "Unpaid")
+def send_email(subject, body, recipients):
+    cfg = st.secrets.get("email", {})
+    required = ["smtp_host", "smtp_port", "smtp_username", "smtp_password", "from_email"]
+    if not all(cfg.get(k) for k in required):
+        return False, "Email SMTP settings are not configured in Streamlit Secrets."
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = cfg["from_email"]
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=20) as server:
+            server.starttls()
+            server.login(cfg["smtp_username"], cfg["smtp_password"])
+            server.send_message(msg)
+        return True, "Email sent."
+    except Exception as exc:
+        return False, str(exc)
 
-            try:
-                renewal = db.table("iqama_renewals").insert({
-                    "employee_id": emp["id"],
-                    "renewal_months": months,
-                    "monthly_rate": rate,
-                    "required_amount": required,
-                    "amount_paid": paid,
-                    "outstanding_amount": outstanding,
-                    "renewal_date": str(renewal_date),
-                    "old_iqama_expiry": old_expiry,
-                    "new_iqama_expiry": str(new_expiry),
-                    "status": status,
-                    "notes": notes
-                }).execute().data[0]
+def notification_key(item, recipient):
+    raw = f"{recipient}|{item['title']}|{item['due_date']}|{item['detail']}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, raw))
 
-                if paid > 0:
-                    db.table("iqama_renewal_payments").insert({
-                        "renewal_id": renewal["id"],
-                        "employee_id": emp["id"],
-                        "amount_paid": paid,
-                        "payment_date": str(renewal_date),
-                        "notes": notes
-                    }).execute()
-
-                db.table("employees").update({
-                    "iqama_expiry": str(new_expiry)
-                }).eq("id", emp["id"]).execute()
-
-                st.success(f"Iqama renewal saved. New expiry: {new_expiry}")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    st.subheader("Record Additional Iqama Payment")
-    renewals = db.table("iqama_renewals").select("*").eq(
-        "employee_id", emp["id"]
-    ).execute().data
-
-    if renewals:
-        renewal = st.selectbox(
-            "Select Renewal",
-            renewals,
-            format_func=lambda x: f"{x['renewal_date']} - Outstanding {money(x['outstanding_amount'])}"
+def process_email_notifications(items, guardian_rows):
+    # A log row prevents repeat emails for the same recipient and due item.
+    recipients = []
+    for row in guardian_rows:
+        if row.get("is_active", True) and row.get("email"):
+            recipients.append(row["email"])
+    if not recipients:
+        return
+    for item in items:
+        days = item["days"]
+        if days not in (20, 15, 7, 0) and days >= 0:
+            continue
+        body = (
+            f"AGC Management System reminder\n\n"
+            f"{item['title']}\n{item['detail']}\n"
+            f"Due date: {item['due_date']}\nStatus: {item['timing']}\n"
+            f"Amount: {item['amount'] if item['amount'] is not None else 'Not specified'} SAR\n"
         )
+        for recipient in recipients:
+            key = notification_key(item, recipient)
+            try:
+                existing = (supabase.table("notification_log").select("id")
+                            .eq("event_key", key).limit(1).execute().data or [])
+                if existing:
+                    continue
+                ok, message = send_email(f"AGC Reminder: {item['title']}", body, [recipient])
+                if ok:
+                    supabase.table("notification_log").insert({
+                        "event_key": key, "recipient_email": recipient,
+                        "event_title": item["title"], "due_date": item["due_date"].isoformat()
+                    }).execute()
+            except Exception:
+                # Keep dashboard working even if email configuration/log table is missing.
+                pass
 
-        with st.form("iqama_payment"):
-            payment = st.number_input("Payment Amount", min_value=0.01)
-            payment_date = st.date_input("Payment Date")
-            if st.form_submit_button("Record Payment"):
-                outstanding = float(renewal["outstanding_amount"] or 0)
-                if payment > outstanding:
-                    st.error("Payment exceeds outstanding amount.")
-                else:
-                    new_paid = float(renewal["amount_paid"]) + payment
-                    new_outstanding = outstanding - payment
-                    status = "Paid" if new_outstanding == 0 else "Partial"
+# =========================================================
+# LOGIN
+# =========================================================
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "profile" not in st.session_state:
+    st.session_state.profile = None
 
-                    try:
-                        db.table("iqama_renewal_payments").insert({
-                            "renewal_id": renewal["id"],
-                            "employee_id": emp["id"],
-                            "amount_paid": payment,
-                            "payment_date": str(payment_date)
-                        }).execute()
-
-                        db.table("iqama_renewals").update({
-                            "amount_paid": new_paid,
-                            "outstanding_amount": new_outstanding,
-                            "status": status
-                        }).eq("id", renewal["id"]).execute()
-
-                        st.success("Payment saved")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-
-    st.subheader("Renewal History")
-    st.dataframe(pd.DataFrame(renewals), use_container_width=True)
-
-# ---------------- OTHER EXISTING MODULES ----------------
-elif page == "Other Modules":
-    st.title("Other Management Modules")
-
-    table = st.selectbox("Select Module", TABLES)
-    data = get_data(table)
-    df = pd.DataFrame(data)
-
-    st.subheader(table.replace("_", " ").title())
-    st.dataframe(df, use_container_width=True)
-
-    st.caption("Add records below. Use the table's existing column names.")
-
-    if table not in ["employees", "salary_records", "employee_advances",
-                     "salary_settlements", "iqama_renewals",
-                     "iqama_renewal_payments"]:
-        with st.expander("Add Record"):
-            if not df.empty:
-                columns = [c for c in df.columns if c not in ["id", "created_at"]]
+if st.session_state.user is None:
+    st.title("AGC Management System")
+    st.subheader("Administrator Login")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button("Login", type="primary"):
+        try:
+            result = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            user = result.user
+            profile = (supabase.table("profiles").select("*").eq("id", user.id)
+                       .single().execute().data)
+            if profile and profile.get("is_active") and profile.get("role") == "admin":
+                st.session_state.user = user
+                st.session_state.profile = profile
+                st.rerun()
             else:
-                st.warning("No existing rows found to detect columns. Add records through the dedicated module or configure table fields.")
-                columns = []
+                supabase.auth.sign_out()
+                st.error("Admin access only.")
+        except Exception as exc:
+            notify_error("Login failed", exc)
 
-            values = {}
-            for col in columns:
-                value = st.text_input(col)
-                if value.strip():
-                    values[col] = value
+else:
+    profile = st.session_state.profile or {}
+    st.sidebar.title("AGC Management")
+    st.sidebar.success(f"Welcome {profile.get('full_name', 'Admin')}")
+    if st.sidebar.button("Logout"):
+        supabase.auth.sign_out()
+        st.session_state.user = None
+        st.session_state.profile = None
+        st.rerun()
 
-            if st.button("Save Record"):
-                if values:
-                    insert(table, values)
+    pages = ["Dashboard"] + list(MODULES.keys()) + ["Guardian Contacts"]
+    page = st.sidebar.radio("Select Module", pages)
+
+    if page == "Dashboard":
+        st.title("AGC Main Dashboard")
+        st.caption("Live Company Management Overview")
+        employees = get_data("employees")
+        salaries = get_data("salary_records")
+        vehicles = get_data("vehicles")
+        drivers = get_data("drivers")
+        advances = get_data("driver_advances")
+        expenses = get_data("petty_cash_expenses")
+        rent = get_data("accommodation_rent_payments")
+        utilities = get_data("utility_bills")
+        office = get_data("office_expenses")
+
+        def total(rows, field):
+            return sum(float(r.get(field) or 0) for r in rows)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Employees", len(employees))
+        c2.metric("Active Employees", sum(1 for r in employees if r.get("is_active")))
+        c3.metric("Total Vehicles", len(vehicles))
+        c4.metric("Total Drivers", len(drivers))
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Monthly Salary (SAR)", f"{total(employees, 'monthly_salary'):,.2f}")
+        c6.metric("Salary Outstanding (SAR)", f"{sum(max(0, float(r.get('amount_due') or 0)-float(r.get('amount_paid') or 0)) for r in salaries):,.2f}")
+        c7.metric("Driver Advances (SAR)", f"{total(advances, 'amount'):,.2f}")
+        c8.metric("Petty Cash Expenses (SAR)", f"{total(expenses, 'amount'):,.2f}")
+        st.subheader("Outstanding Payments")
+        st.write("Rent Outstanding:", f"{sum(max(0, float(r.get('amount_due') or 0)-float(r.get('amount_paid') or 0)) for r in rent):,.2f} SAR")
+        st.write("Unpaid Utility Bills:", f"{sum(float(r.get('amount') or 0) for r in utilities if r.get('status') != 'Paid'):,.2f} SAR")
+        st.write("Office Expenses:", f"{total(office, 'amount'):,.2f} SAR")
+
+        st.subheader("Notifications & Upcoming Payments")
+        notifications = build_notifications()
+        if notifications:
+            for item in notifications:
+                amount_text = f" | {item['amount']:,.2f} SAR" if item["amount"] is not None else ""
+                st.warning(f"{item['timing']} — {item['title']} — {item['detail']} — Due: {item['due_date']}{amount_text}")
+        else:
+            st.success("No upcoming or overdue notifications.")
+
+        st.subheader("Employee Records")
+        if employees:
+            st.dataframe(pd.DataFrame(employees), use_container_width=True, hide_index=True)
+        else:
+            st.info("No employee records yet.")
+
+        # Email is sent only when the app/dashboard is opened or refreshed.
+        try:
+            guardians = get_data("guardian_contacts")
+            if st.button("Send Due Email Notifications"):
+                process_email_notifications(notifications, guardians)
+                st.info("Email notification check completed. Check SMTP settings and notification_log if no email arrives.")
+        except Exception:
+            st.caption("Create the Guardian Contacts and Notification Log tables using the SQL setup instructions.")
+
+    elif page == "Guardian Contacts":
+        st.title("Guardian / Notification Contacts")
+        st.caption("Add people who should receive AGC email reminders. They do not get application login access.")
+        try:
+            contacts = get_data("guardian_contacts")
+            with st.form("add_guardian"):
+                g_name = st.text_input("Guardian Name")
+                g_email = st.text_input("Email Address")
+                g_active = st.checkbox("Active", value=True)
+                add = st.form_submit_button("Add Guardian", type="primary")
+            if add:
+                if not g_name.strip() or not g_email.strip() or "@" not in g_email:
+                    st.error("Enter a valid name and email address.")
                 else:
-                    st.warning("Enter at least one value.")
+                    supabase.table("guardian_contacts").insert({
+                        "name": g_name.strip(), "email": g_email.strip(),
+                        "is_active": g_active
+                    }).execute()
+                    st.success("Guardian added.")
+                    st.rerun()
+            st.subheader("Saved Guardians")
+            if contacts:
+                st.dataframe(pd.DataFrame(contacts), use_container_width=True, hide_index=True)
+                ids = [str(x["id"]) for x in contacts]
+                chosen = st.selectbox("Select guardian to remove", ids,
+                                      format_func=lambda x: next((r["name"] + " — " + r["email"] for r in contacts if str(r["id"]) == x), x))
+                if st.button("Delete Guardian"):
+                    supabase.table("guardian_contacts").delete().eq("id", chosen).execute()
+                    st.success("Guardian deleted.")
+                    st.rerun()
+            else:
+                st.info("No guardian contacts added.")
+        except Exception as exc:
+            st.error("Guardian tables are not ready. Run the SQL setup provided with this app.")
+            st.code(str(exc))
 
-    if not df.empty and "id" in df.columns:
-        selected_id = st.selectbox("Record ID", df["id"].tolist())
-        if st.button("Delete Selected Record"):
-            st.warning("Only delete records you are sure are not needed.")
-            if st.checkbox("Confirm deletion"):
-                delete(table, selected_id)
+    else:
+        module_page(page, MODULES[page])
