@@ -139,10 +139,26 @@ def render_field(field, kind, key, old=None):
         return chosen
     return None
 
+def _flash(message, kind="success"):
+    st.session_state["agc_flash"] = (kind, message)
+
+
+def show_flash():
+    item = st.session_state.pop("agc_flash", None)
+    if item:
+        kind, message = item
+        getattr(st, kind, st.success)(message)
+
+
+def _stable_rows(rows):
+    # Keep the real database UUID untouched; show a simple serial number to users.
+    return sorted(rows, key=lambda r: (str(r.get("created_at") or ""), str(r.get("id") or "")))
+
+
 def module_page(name, config):
     table = config["table"]
     st.title(name)
-    add_tab, view_tab, delete_tab = st.tabs(["Add New", "View / Edit", "Delete"])
+    add_tab, records_tab = st.tabs(["Add New", "Records"])
 
     with add_tab:
         st.subheader(f"Add {name}")
@@ -159,71 +175,98 @@ def module_page(name, config):
             else:
                 try:
                     supabase.table(table).insert(values).execute()
-                    st.success("Record saved successfully.")
+                    _flash(f"{name} record saved successfully.")
                     st.rerun()
                 except Exception as exc:
                     notify_error("Save failed", exc)
 
-    rows = get_data(table)
-    with view_tab:
+    show_flash()
+    with records_tab:
         st.subheader(f"{name} Records")
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            record_ids = [str(r["id"]) for r in rows]
-            selected_id = st.selectbox(
-                "Select record to edit", record_ids,
-                format_func=lambda rid: display_label(
-                    next(x for x in rows if str(x["id"]) == rid), rid
-                ),
-                key=f"edit_select_{table}"
-            )
-            old = next(r for r in rows if str(r["id"]) == selected_id)
-            with st.form(f"edit_form_{table}"):
-                updated = {}
-                for field, kind, required in config["fields"]:
-                    updated[field] = render_field(
-                        field, kind, f"edit_{table}_{field}", old
-                    )
-                save = st.form_submit_button("Update Record", type="primary")
-            if save:
-                missing = [f.replace("_", " ").title() for f, k, req in config["fields"]
-                           if req and (updated.get(f) is None or updated.get(f) == "")]
-                if missing:
-                    st.error("Please complete required fields: " + ", ".join(missing))
-                else:
-                    try:
-                        supabase.table(table).update(updated).eq("id", selected_id).execute()
-                        st.success("Record updated.")
-                        st.rerun()
-                    except Exception as exc:
-                        notify_error("Update failed", exc)
-        else:
+        rows = _stable_rows(get_data(table))
+        if not rows:
             st.info("No records found.")
+            return
 
-    with delete_tab:
-        st.subheader(f"Delete {name} Record")
-        if rows:
-            delete_id = st.selectbox(
-                "Select record to delete", [str(r["id"]) for r in rows],
-                format_func=lambda rid: display_label(
-                    next(x for x in rows if str(x["id"]) == rid), rid
-                ),
-                key=f"delete_select_{table}"
-            )
-            confirm = st.checkbox("I confirm that I want to permanently delete this record.",
-                                  key=f"confirm_delete_{table}")
-            if st.button("Delete Record", type="primary", key=f"delete_button_{table}"):
-                if not confirm:
-                    st.warning("Please confirm deletion.")
-                else:
-                    try:
-                        supabase.table(table).delete().eq("id", delete_id).execute()
-                        st.success("Record deleted.")
+        # Each record is rendered as one row with actions beside it.
+        header = st.columns([0.07, 0.43, 0.16, 0.16, 0.18])
+        header[0].markdown("**No.**")
+        header[1].markdown("**Record**")
+        header[2].markdown("**View**")
+        header[3].markdown("**Edit**")
+        header[4].markdown("**Delete**")
+
+        for i, row in enumerate(rows, 1):
+            rid = str(row.get("id"))
+            label = display_label(row, f"Record {i}")
+            details = [f"{k.replace('_', ' ').title()}: {v}" for k, v in row.items()
+                       if k not in ("id", "created_at", "updated_at") and v not in (None, "")]
+            summary = " · ".join(details[:3])
+            cells = st.columns([0.07, 0.43, 0.16, 0.16, 0.18])
+            cells[0].write(str(i))
+            cells[1].markdown(f"**{label}**" + (f"\n\n{summary}" if summary else ""))
+            if cells[2].button("View", key=f"view_{table}_{rid}", use_container_width=True):
+                st.session_state[f"viewing_{table}"] = rid
+                st.session_state.pop(f"editing_{table}", None)
+                st.session_state.pop(f"deleting_{table}", None)
+            if cells[3].button("Edit", key=f"edit_{table}_{rid}", use_container_width=True):
+                st.session_state[f"editing_{table}"] = rid
+                st.session_state.pop(f"viewing_{table}", None)
+                st.session_state.pop(f"deleting_{table}", None)
+            if cells[4].button("Delete", key=f"delete_{table}_{rid}", use_container_width=True):
+                st.session_state[f"deleting_{table}"] = rid
+                st.session_state.pop(f"viewing_{table}", None)
+                st.session_state.pop(f"editing_{table}", None)
+
+            if st.session_state.get(f"viewing_{table}") == rid:
+                with st.container(border=True):
+                    st.markdown(f"**{name} — Record {i}: {label}**")
+                    visible = {k.replace("_", " ").title(): v for k, v in row.items()
+                               if k not in ("id", "created_at", "updated_at")}
+                    st.json(visible)
+                    if st.button("Close View", key=f"close_view_{table}_{rid}"):
+                        st.session_state.pop(f"viewing_{table}", None)
                         st.rerun()
-                    except Exception as exc:
-                        notify_error("Delete failed", exc)
-        else:
-            st.info("No records found.")
+
+            if st.session_state.get(f"editing_{table}") == rid:
+                with st.container(border=True):
+                    st.markdown(f"**Edit {name} — Record {i}**")
+                    with st.form(f"inline_edit_{table}_{rid}"):
+                        updated = {}
+                        for field, kind, required in config["fields"]:
+                            updated[field] = render_field(
+                                field, kind, f"inline_{table}_{rid}_{field}", row
+                            )
+                        save = st.form_submit_button("Save Changes", type="primary")
+                    if save:
+                        missing = [f.replace("_", " ").title() for f, k, req in config["fields"]
+                                   if req and (updated.get(f) is None or updated.get(f) == "")]
+                        if missing:
+                            st.error("Please complete required fields: " + ", ".join(missing))
+                        else:
+                            try:
+                                supabase.table(table).update(updated).eq("id", rid).execute()
+                                st.session_state.pop(f"editing_{table}", None)
+                                _flash(f"{name} record updated successfully.")
+                                st.rerun()
+                            except Exception as exc:
+                                notify_error("Update failed", exc)
+
+            if st.session_state.get(f"deleting_{table}") == rid:
+                with st.container(border=True):
+                    st.warning("This action permanently deletes this record. Related records may be affected by database foreign-key rules.")
+                    confirm = st.checkbox("I confirm permanent deletion", key=f"confirm_{table}_{rid}")
+                    if st.button("Confirm Delete", type="primary", key=f"confirm_delete_{table}_{rid}"):
+                        if not confirm:
+                            st.warning("Please confirm deletion first.")
+                        else:
+                            try:
+                                supabase.table(table).delete().eq("id", rid).execute()
+                                st.session_state.pop(f"deleting_{table}", None)
+                                _flash(f"{name} record deleted successfully.")
+                                st.rerun()
+                            except Exception as exc:
+                                notify_error("Delete failed", exc)
 
 # =========================================================
 # NOTIFICATIONS
@@ -444,7 +487,11 @@ else:
 
         st.subheader("Employee Records")
         if employees:
-            st.dataframe(pd.DataFrame(employees), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame([
+                {"Sr. No.": i, **{k: v for k, v in r.items()
+                 if k not in ("id", "created_at", "updated_at")}}
+                for i, r in enumerate(_stable_rows(employees), 1)
+            ]), use_container_width=True, hide_index=True)
         else:
             st.info("No employee records yet.")
 
@@ -460,6 +507,7 @@ else:
     elif page == "Guardian Contacts":
         st.title("Guardian / Notification Contacts")
         st.caption("Add people who should receive AGC email reminders. They do not get application login access.")
+        show_flash()
         try:
             contacts = get_data("guardian_contacts")
             with st.form("add_guardian"):
@@ -475,18 +523,103 @@ else:
                         "name": g_name.strip(), "email": g_email.strip(),
                         "is_active": g_active
                     }).execute()
-                    st.success("Guardian added.")
+                    _flash("Guardian contact saved successfully.")
                     st.rerun()
             st.subheader("Saved Guardians")
             if contacts:
-                st.dataframe(pd.DataFrame(contacts), use_container_width=True, hide_index=True)
-                ids = [str(x["id"]) for x in contacts]
-                chosen = st.selectbox("Select guardian to remove", ids,
-                                      format_func=lambda x: next((r["name"] + " — " + r["email"] for r in contacts if str(r["id"]) == x), x))
-                if st.button("Delete Guardian"):
-                    supabase.table("guardian_contacts").delete().eq("id", chosen).execute()
-                    st.success("Guardian deleted.")
-                    st.rerun()
+                contacts = _stable_rows(contacts)
+                h = st.columns([0.07, 0.43, 0.16, 0.16, 0.18])
+                for cell, title in zip(h, ["**No.**", "**Guardian**", "**View**", "**Edit**", "**Delete**"]):
+                    cell.markdown(title)
+                for i, row in enumerate(contacts, 1):
+                    rid = str(row["id"])
+                    cells = st.columns([0.07, 0.43, 0.16, 0.16, 0.18])
+                    cells[0].write(str(i))
+                    cells[1].markdown(f"**{row.get('name', 'Guardian')}**\n\n{row.get('email', '')} · {'Active' if row.get('is_active', True) else 'Inactive'}")
+                    if cells[2].button("View", key=f"guardian_view_{rid}", use_container_width=True):
+                        st.session_state["guardian_view_id"] = rid
+                        st.session_state.pop("guardian_edit_id", None)
+                        st.session_state.pop("guardian_delete_id", None)
+                    if cells[3].button("Edit", key=f"guardian_edit_{rid}", use_container_width=True):
+                        st.session_state["guardian_edit_id"] = rid
+                        st.session_state.pop("guardian_view_id", None)
+                        st.session_state.pop("guardian_delete_id", None)
+                    if cells[4].button("Delete", key=f"guardian_delete_{rid}", use_container_width=True):
+                        st.session_state["guardian_delete_id"] = rid
+                        st.session_state.pop("guardian_view_id", None)
+                        st.session_state.pop("guardian_edit_id", None)
+                    if st.session_state.get("guardian_view_id") == rid:
+                        with st.container(border=True):
+                            st.json({"Name": row.get("name"), "Email": row.get("email"),
+                                     "Active": row.get("is_active", True)})
+                    if st.session_state.get("guardian_edit_id") == rid:
+                        with st.container(border=True):
+                            with st.form(f"guardian_edit_form_{rid}"):
+                                new_name = st.text_input("Guardian Name", value=row.get("name", ""))
+                                new_email = st.text_input("Email Address", value=row.get("email", ""))
+                                new_active = st.checkbox("Active", value=row.get("is_active", True))
+                                save_guardian = st.form_submit_button("Save Changes", type="primary")
+                            if save_guardian:
+                                if not new_name.strip() or "@" not in new_email:
+                                    st.error("Enter a valid name and email address.")
+                                else:
+                                    try:
+                                        supabase.table("guardian_contacts").update({
+                                            "name": new_name.strip(), "email": new_email.strip(),
+                                            "is_active": new_active
+                                        }).eq("id", rid).execute()
+                                        st.session_state.pop("guardian_edit_id", None)
+                                        _flash("Guardian contact updated successfully.")
+                                        st.rerun()
+                                    except Exception as exc:
+                                        notify_error("Guardian update failed", exc)
+                    if st.session_state.get("guardian_delete_id") == rid:
+                        with st.container(border=True):
+                            confirm_guardian = st.checkbox("Confirm permanent deletion", key=f"guardian_confirm_{rid}")
+                            if st.button("Confirm Delete", key=f"guardian_confirm_delete_{rid}"):
+                                if confirm_guardian:
+                                    try:
+                                        supabase.table("guardian_contacts").delete().eq("id", rid).execute()
+                                        st.session_state.pop("guardian_delete_id", None)
+                                        _flash("Guardian contact deleted successfully.")
+                                        st.rerun()
+                                    except Exception as exc:
+                                        notify_error("Guardian delete failed", exc)
+                                else:
+                                    st.warning("Please confirm deletion first.")
+                        if st.session_state.get("guardian_edit_id") == rid:
+                            with st.form(f"guardian_edit_form_{rid}"):
+                                new_name = st.text_input("Guardian Name", value=row.get("name", ""))
+                                new_email = st.text_input("Email Address", value=row.get("email", ""))
+                                new_active = st.checkbox("Active", value=row.get("is_active", True))
+                                save_guardian = st.form_submit_button("Save Changes", type="primary")
+                            if save_guardian:
+                                if not new_name.strip() or "@" not in new_email:
+                                    st.error("Enter a valid name and email address.")
+                                else:
+                                    try:
+                                        supabase.table("guardian_contacts").update({
+                                            "name": new_name.strip(), "email": new_email.strip(),
+                                            "is_active": new_active
+                                        }).eq("id", rid).execute()
+                                        st.session_state.pop("guardian_edit_id", None)
+                                        _flash("Guardian contact updated successfully.")
+                                        st.rerun()
+                                    except Exception as exc:
+                                        notify_error("Guardian update failed", exc)
+                        if st.session_state.get("guardian_delete_id") == rid:
+                            confirm_guardian = st.checkbox("Confirm permanent deletion", key=f"guardian_confirm_{rid}")
+                            if st.button("Confirm Delete", key=f"guardian_confirm_delete_{rid}"):
+                                if confirm_guardian:
+                                    try:
+                                        supabase.table("guardian_contacts").delete().eq("id", rid).execute()
+                                        st.session_state.pop("guardian_delete_id", None)
+                                        _flash("Guardian contact deleted successfully.")
+                                        st.rerun()
+                                    except Exception as exc:
+                                        notify_error("Guardian delete failed", exc)
+                                else:
+                                    st.warning("Please confirm deletion first.")
             else:
                 st.info("No guardian contacts added.")
         except Exception as exc:
